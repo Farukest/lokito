@@ -1,0 +1,62 @@
+# Compiler files
+cache/
+out/
+build-info-reference/
+
+# Ignores development broadcast logs
+/broadcast
+/broadcast/*/31337/
+/broadcast/*/11155111/
+/broadcast/**/dry-run/
+
+# Ignore the file with RPC and Etherscan API keys for deployment.
+deployment_secrets.toml
+
+# Devnet logs
+/logs
+
+# Ignore all env files
+.env*
+# Except for the templates and running network env files
+!.env.broker-template
+!.env.localnet-template
+.env.eth-sepolia
+.env.base-sepolia-b685
+.env.base
+.env.base-b685
+
+# Ignore broker config file(s)
+*broker*.toml
+!broker.toml
+
+# Cargo
+target/
+
+# Misc
+.DS_Store
+.idea
+.aider*
+.claude
+CLAUDE.md
+.cursor
+
+
+# Ignore generated files
+contracts/src/SetBuilderImageID.sol
+contracts/src/libraries/AssessorImageID.sol
+contracts/src/EchoImageID.sol
+contracts/src/ResolveImageID.sol
+contracts/src/libraries/UtilImageID.sol
+contracts/test/SetBuilderElf.sol
+contracts/test/AssessorElf.sol
+contracts/test/EchoElf.sol
+contracts/test/ResolveElf.sol
+contracts/test/UtilElf.sol
+
+# Lints & Format Caches
+.lycheecache
+# Ignore sccache install location created in CI
+sccache-v0.*
+
+# Ignore generated docs
+/docs

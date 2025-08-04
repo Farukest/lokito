@@ -1,0 +1,54 @@
+[profile.default]
+src = "./contracts/src"
+# OZ Upgrades requires the out dir to be `./out`, or for `FOUNDRY_OUT` to be set
+# https://github.com/OpenZeppelin/openzeppelin-foundry-upgrades/blob/cfd861bc18ef4737e82eae6ec75304e27af699ef/src/internal/Utils.sol#L139-L147
+out = "./out"
+fs_permissions = [{ access = "read", path = "./out" }, { access = "read", path = "./contracts/deployment.toml" }]
+libs = ["./lib"]
+script = "./contracts/scripts"
+test = "./contracts/test"
+ffi = true
+evm_version = 'cancun'
+via_ir = true
+optimizer = true
+# Use 100 runs only to reduce contract size.
+optimizer_runs = 100
+ast = true
+build_info = true
+extra_output = ["storageLayout"]
+gas_reports = ["BoundlessMarket"]
+solc_version = "0.8.26"
+# Do not append metadata hash to bytecode. We do not currently use it, and omitting it results in
+# more stable build artifacts, which is important since we check the bytecode into git.
+# For information about Solidity metadata, see https://docs.soliditylang.org/en/latest/metadata.html
+bytecode_hash = "none"
+snapshots = "contracts/snapshots"
+isolate = true
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[fmt]
+line_length = 120
+tab_width = 4
+quote_style = "double"
+
+# Profile used to run deployment tests, which check the correctness of contracts as deployed.
+# TIP: You can select this profile by setting env var FOUNDRY_PROFILE=deployment-test
+[profile.deployment-test]
+test = "contracts/deployment-test"
+#match_path = "contracts/deployment-test/*"
+fs_permissions = [{ access = "read", path = "contracts/deployment.toml" }]
+isolate = true
+
+# Profile used to run upgradeability tests.
+# TIP: You can select this profile by setting env vars FOUNDRY_PROFILE=reference-contract and FOUNDRY_OUT="contracts/reference-contract/out"
+[profile.reference-contract]
+src = "contracts/src"
+out = "contracts/reference-contract/out"
+test = "contracts/reference-contract/test"
+libs = ["lib"]
+ffi = true
+ast = true
+build_info = true
+extra_output = ["storageLayout"]
+fs_permissions = [{ access = "read", path = "contracts/reference-contract/out" }]

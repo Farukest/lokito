@@ -1,0 +1,27 @@
+[package]
+name = "doc-test"
+resolver = "2"
+version = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[package.metadata.release]
+release = false
+
+[dev-dependencies]
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+anyhow = "1.0"
+boundless-market = { workspace = true }
+postcard = { workspace = true }
+risc0-steel = { git = "https://github.com/risc0/risc0-ethereum", branch = "release-2.2", features = ["host"] }
+risc0-zkvm = { workspace = true, default-features = false, features = ["std"] }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[build-dependencies]
+glob = "0.3"
+regex = "1.11"

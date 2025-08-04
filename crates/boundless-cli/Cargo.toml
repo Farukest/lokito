@@ -1,0 +1,61 @@
+[package]
+name = "boundless-cli"
+description = "CLI for the Boundless, the universal ZK protocol"
+resolver = "2"
+version = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = "Apache-2.0"
+build = "build.rs"
+
+[build-dependencies]
+shadow-rs = "1.1"
+
+[dependencies]
+alloy = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+bincode = { workspace = true }
+bonsai-sdk = { workspace = true }
+boundless-assessor = { workspace = true }
+boundless-market = { workspace = true }
+bytemuck = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+futures = { version = "0.3" }
+hex = { workspace = true }
+libc = "0.2.159"
+reqwest = { workspace = true }
+risc0-aggregation = { workspace = true }
+risc0-ethereum-contracts = { workspace = true }
+risc0-zkvm = { workspace = true, features = ["std", "default"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+shadow-rs = { version = "1.1", default-features = false }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls", "chrono"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+url = { workspace = true }
+
+[[bin]]
+name = "boundless"
+
+[[bin]]
+name = "boundless-ffi"
+
+[dev-dependencies]
+boundless-market = { workspace = true }
+boundless-market-test-utils = { workspace = true }
+order-stream = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls", "chrono"] }
+tempfile = { workspace = true }
+tracing-test = { workspace = true }
+
+[features]
+# Enables the prove feature on risc0-zkvm to build the prover directly into this CLI.
+prove = ["risc0-zkvm/prove"]
+# Enables the cuda feature on risc0-zkvm to build the prover directly into this CLI, with CUDA support.
+cuda = ["prove", "risc0-zkvm/cuda"]
