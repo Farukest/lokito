@@ -426,9 +426,23 @@ where
             Err(err) => {
 
                 let failed_lock_time = chrono::Utc::now();
+                let duration = failed_lock_time - pre_lock_time;
+                let duration_secs = duration.num_milliseconds() as f64 / 1000.0;
+
+                // Extract and decode revert reason
+                let revert_info = Self::extract_and_decode_revert_reason(&err);
+
                 println!("                                   ");
                 println!("                                   ");
-                println!("❌ FAILED LOCK SUCCESS: 0x{:x} at {} BECAUSE : {}", request_id, Self::format_time(failed_lock_time), err);
+                println!("❌ FAILED LOCK: 0x{:x} at {} (took {:.3}s)",
+                         request_id,
+                         Self::format_time(failed_lock_time),
+                         duration_secs
+                );
+                println!("   ERROR: {}", err);
+                if let Some(revert_reason) = revert_info {
+                    println!("   REVERT REASON: {}", revert_reason);
+                }
                 println!("                                   ");
                 println!("                                   ");
 
@@ -438,10 +452,84 @@ where
             }
         }
 
-
-
-
         Ok(())
+    }
+
+
+    // Helper functions for revert reason extraction and decoding
+    fn extract_and_decode_revert_reason(error: &impl std::fmt::Display) -> Option<String> {
+        let error_str = error.to_string();
+
+        // Look for revert data in various formats
+        if let Some(revert_data) = Self::extract_revert_data_from_error(&error_str) {
+            return Some(Self::decode_revert_reason(&revert_data));
+        }
+
+        None
+    }
+
+    fn extract_revert_data_from_error(error_str: &str) -> Option<String> {
+        // Try different patterns where revert data might appear
+        let patterns = [
+            "Revert Data: ",
+            "data: Some(RawValue(\"",
+            "revert data: ",
+        ];
+
+        for pattern in &patterns {
+            if let Some(start) = error_str.find(pattern) {
+                let data_start = start + pattern.len();
+                let remaining = &error_str[data_start..];
+
+                // Extract hex data
+                if remaining.starts_with("0x") {
+                    if let Some(end) = remaining.find(['\n', ')', '"', ' '].as_ref()) {
+                        return Some(remaining[..end].to_string());
+                    } else {
+                        return Some(remaining.to_string());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn decode_revert_reason(revert_data: &str) -> String {
+        if revert_data.len() < 10 {
+            return format!("Invalid revert data: {}", revert_data);
+        }
+
+        let selector = &revert_data[..10];
+
+        match selector {
+            "0x897f6c58" => {
+                // Custom error with address parameter
+                if revert_data.len() >= 74 {
+                    let address_hex = &revert_data[10..74];
+                    format!("Custom error with address: 0x{}", address_hex)
+                } else {
+                    "Custom error 0x897f6c58 (incomplete data)".to_string()
+                }
+            }
+            "0x08c379a0" => {
+                // Error(string) - Try to decode the string if possible
+                "Standard revert with message".to_string()
+            }
+            "0x4e487b71" => {
+                // Panic(uint256)
+                "Panic - Assertion failed or arithmetic error".to_string()
+            }
+            "0xf92ee8a9" => {
+                "Request already locked".to_string()
+            }
+            "0x7138356f" => {
+                "Invalid signature".to_string()
+            }
+            _ => {
+                format!("Unknown error selector: {} (full data: {})", selector, revert_data)
+            }
+        }
     }
 
     // Manuel decode fonksiyonu - ABI decode başarısız olursa
