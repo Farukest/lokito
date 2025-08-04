@@ -108,6 +108,7 @@ struct GasPriceCache {
     max_fee_per_gas: u128,
     max_priority_fee_per_gas: u128,
 }
+
 impl GasPriceCache {
     async fn update<T: Provider>(&mut self, provider: &T) -> anyhow::Result<()> {
         let fee = provider.estimate_eip1559_fees().await.context("Failed to estimate fee")?;
@@ -123,6 +124,18 @@ impl GasPriceCache {
 
     fn is_expired(&self, ttl: Duration) -> bool {
         self.last_update.elapsed() > ttl
+    }
+
+    // Add the missing method
+    fn get_cached_or_default(&self, extra_gas: u64) -> (u128, u128) {
+        // Add the extra gas to the cached values
+        let base_fee = self.max_fee_per_gas;
+        let priority_fee = self.max_priority_fee_per_gas;
+
+        (
+            base_fee.saturating_add(extra_gas as u128),
+            priority_fee.saturating_add(extra_gas as u128)
+        )
     }
 }
 
@@ -553,6 +566,82 @@ where
         self.check_stake_balance().await?;
 
         Ok(receipt.block_number.context("TXN Receipt missing block number")?)
+    }
+
+
+    pub async fn lock_request_fast(
+        &self,
+        request: &ProofRequest,
+        client_sig: impl Into<Bytes>,
+        extra_gas: u64,
+    ) -> Result<u64, MarketError>
+    where
+        P: 'static,
+    {
+        let start = chrono::Utc::now();
+
+        let client_sig_bytes = client_sig.into();
+
+        // 🔥 SKIP LOCK CHECK - assume caller already checked
+        // let is_locked_in: bool = self.instance.requestIsLocked(request.id).call().await.context("call failed")?;
+
+        let mut call = self.instance.lockRequest(request.clone(), client_sig_bytes).from(self.caller);
+
+        // 🔥 FAST GAS: Use cached values without update check
+        let cache = self.gas_price_cache.lock().await;
+        let (max_fee, max_priority_fee) = cache.get_cached_or_default(extra_gas);
+        drop(cache); // Release lock immediately
+
+        call = call
+            .max_fee_per_gas(max_fee)
+            .max_priority_fee_per_gas(max_priority_fee);
+
+        tracing::info!("⚡ FAST LOCK {:x} with gas fees: max={}, priority={}",
+               request.id, max_fee, max_priority_fee);
+
+        // 🔥 IMMEDIATE SEND
+        let pending_tx = call.send().await?;
+        let tx_hash = *pending_tx.tx_hash();
+
+        let send_time = chrono::Utc::now();
+        let send_duration = send_time.signed_duration_since(start).num_milliseconds();
+
+        tracing::info!("⚡ FAST LOCK {:x} sent in {}ms, tx: {:x}",
+               request.id, send_duration, tx_hash);
+
+        // 🔥 FAST RECEIPT - with shorter timeout
+        let receipt = self.get_receipt_with_retry_fast(pending_tx).await?;
+
+        let end = chrono::Utc::now();
+        let total_duration = end.signed_duration_since(start).num_milliseconds();
+
+        tracing::info!("⚡ FAST LOCK {:x} completed in {}ms", request.id, total_duration);
+
+        if !receipt.status() {
+            return Err(MarketError::LockRevert(receipt.transaction_hash));
+        }
+
+        // 🔥 ASYNC BALANCE CHECK - don't wait for it
+        let service_clone = self.clone();
+        let _handle = tokio::spawn(async move {
+            if let Err(e) = service_clone.check_stake_balance().await {
+                tracing::warn!("Async balance check failed: {:?}", e);
+            }
+        });
+
+        Ok(receipt.block_number.context("TXN Receipt missing block number")?)
+    }
+
+    /// Fast receipt getter with shorter timeouts
+    async fn get_receipt_with_retry_fast(&self, pending_tx: PendingTransactionBuilder<alloy::network::Ethereum>) -> Result<TransactionReceipt, MarketError> {
+        // Daha kısa timeout ile hızlı receipt alma
+        let receipt = pending_tx
+            .with_timeout(Some(Duration::from_secs(30))) // Normal: 60s, Fast: 30s
+            .get_receipt()
+            .await
+            .map_err(|e| MarketError::TxnConfirmationError(anyhow::anyhow!("Failed to get receipt: {:?}", e)))?;
+
+        Ok(receipt)
     }
 
     /// Lock the request to the prover, giving them exclusive rights to be paid to

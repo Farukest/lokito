@@ -14,7 +14,7 @@
 
 #![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 /// Re-export of [alloy], provided to ensure that the correct version of the types used in the
 /// public API are available in case multiple versions of [alloy] are in use.

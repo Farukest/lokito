@@ -140,7 +140,7 @@ where
     {
         tracing::info!("🎯 Starting ENHANCED mempool monitoring for market: 0x{:x}", market_addr);
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(5));
         let mut processed_txs: HashSet<B256> = HashSet::new();
         let mut last_block_number = 0u64;
 
@@ -365,7 +365,7 @@ where
         println!("🚀 LOCK REQUEST STARTING FOR ORDER 0x{:x}", request_id);
         println!("                                   ");
         println!("                                   ");
-        match boundless.lock_request(&proof_request.clone(), client_signature.clone(), lockin_priority_gas).await {
+        match boundless.lock_request_fast(&proof_request.clone(), client_signature.clone(), lockin_priority_gas.unwrap_or(500000)).await {
             Ok(lock_block) => {
 
                 let lock_timestamp = crate::futures_retry::retry(
