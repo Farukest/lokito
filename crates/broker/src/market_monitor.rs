@@ -318,9 +318,9 @@ where
 
         // Konfigürasyon ve limit parametrelerini oku
         let (
-            lockin_priority_gas,
-            allowed_addresses_opt,
-        ) =
+                lockin_priority_gas,
+                allowed_addresses_opt,
+            ) =
             {
                 let locked_conf = config.lock_all().context("Failed to read config").unwrap();
 
@@ -328,6 +328,18 @@ where
                     locked_conf.market.lockin_priority_gas,
                     locked_conf.market.allow_requestor_addresses.clone())
             };
+
+        let allowed_requestors_opt = {
+            let locked_conf = config.lock_all().context("Failed to read config")?;
+            locked_conf.market.allow_requestor_addresses.clone()
+        };
+
+        if let Some(allow_addresses) = allowed_requestors_opt {
+            if !allow_addresses.contains(&client_addr) {
+                tracing::debug!("🚫 Client 0x{:x} not in allowed requestors, skipping", client_addr);
+                return Ok(());
+            }
+        }
 
 
         // 1. DB’den commit edilmiş orderları çek
