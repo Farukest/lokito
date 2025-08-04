@@ -102,42 +102,6 @@ pub enum MarketError {
     TimeoutReached(U256),
 }
 
-#[derive(Clone)]
-struct GasPriceCache {
-    last_update: Instant,
-    max_fee_per_gas: u128,
-    max_priority_fee_per_gas: u128,
-}
-
-impl GasPriceCache {
-    async fn update<T: Provider>(&mut self, provider: &T) -> anyhow::Result<()> {
-        let fee = provider.estimate_eip1559_fees().await.context("Failed to estimate fee")?;
-        self.max_fee_per_gas = fee.max_fee_per_gas;
-        self.max_priority_fee_per_gas = fee.max_priority_fee_per_gas;
-        self.last_update = Instant::now();
-        Ok(())
-    }
-
-    fn get(&self) -> (u128, u128) {
-        (self.max_fee_per_gas, self.max_priority_fee_per_gas)
-    }
-
-    fn is_expired(&self, ttl: Duration) -> bool {
-        self.last_update.elapsed() > ttl
-    }
-
-    // Add the missing method
-    fn get_cached_or_default(&self, extra_gas: u64) -> (u128, u128) {
-        // Add the extra gas to the cached values
-        let base_fee = self.max_fee_per_gas;
-        let priority_fee = self.max_priority_fee_per_gas;
-
-        (
-            base_fee.saturating_add(extra_gas as u128),
-            priority_fee.saturating_add(extra_gas as u128)
-        )
-    }
-}
 
 
 impl From<alloy::contract::Error> for MarketError {
@@ -164,6 +128,28 @@ impl From<alloy::contract::Error> for MarketError {
     }
 }
 
+
+impl<P: Clone> Clone for BoundlessMarketService<P> {
+    fn clone(&self) -> Self {
+        Self {
+            instance: self.instance.clone(),
+            chain_id: self.chain_id.load(Ordering::Relaxed).into(),
+            caller: self.caller,
+            timeout: self.timeout,
+            event_query_config: self.event_query_config.clone(),
+            balance_alert_config: self.balance_alert_config.clone(),
+            receipt_query_config: self.receipt_query_config.clone(),
+            provider : self.provider.clone(),
+            gas_price_cache: Arc::new(Mutex::new(GasPriceCache {
+                last_update: Instant::now() - Duration::from_secs(3600), // Eskimiş başlasın
+                max_fee_per_gas: 0,
+                max_priority_fee_per_gas: 0,
+            })),
+        }
+    }
+}
+
+
 /// Proof market service.
 pub struct BoundlessMarketService<P> {
     instance: IBoundlessMarketInstance<P, Ethereum>,
@@ -176,6 +162,33 @@ pub struct BoundlessMarketService<P> {
     receipt_query_config: ReceiptQueryConfig,
     provider: P,
     gas_price_cache: Arc<Mutex<GasPriceCache>>,
+}
+
+
+#[derive(Clone)]
+struct GasPriceCache {
+    last_update: Instant,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
+}
+
+impl GasPriceCache {
+    async fn update<T: Provider>(&mut self, provider: &T) -> anyhow::Result<()> {
+        let fee = provider.estimate_eip1559_fees().await.context("Failed to estimate fee")?;
+        self.max_fee_per_gas = fee.max_fee_per_gas;
+        self.max_priority_fee_per_gas = fee.max_priority_fee_per_gas;
+        self.last_update = Instant::now();
+        Ok(())
+    }
+
+    fn get(&self) -> (u128, u128) {
+        (self.max_fee_per_gas, self.max_priority_fee_per_gas)
+    }
+
+    fn is_expired(&self, ttl: Duration) -> bool {
+        self.last_update.elapsed() > ttl
+    }
+
 }
 
 #[derive(Clone, Debug)]
@@ -200,25 +213,6 @@ struct StakeBalanceAlertConfig {
     error_threshold: Option<U256>,
 }
 
-impl<P: Clone> Clone for BoundlessMarketService<P> {
-    fn clone(&self) -> Self {
-        Self {
-            instance: self.instance.clone(),
-            chain_id: self.chain_id.load(Ordering::Relaxed).into(),
-            caller: self.caller,
-            timeout: self.timeout,
-            event_query_config: self.event_query_config.clone(),
-            balance_alert_config: self.balance_alert_config.clone(),
-            receipt_query_config: self.receipt_query_config.clone(),
-            provider : self.provider.clone(),
-            gas_price_cache: Arc::new(Mutex::new(GasPriceCache {
-                last_update: Instant::now() - Duration::from_secs(3600), // Eskimiş başlasın
-                max_fee_per_gas: 0,
-                max_priority_fee_per_gas: 0,
-            })),
-        }
-    }
-}
 
 fn extract_tx_log<E: SolEvent + Debug + Clone>(
     receipt: &TransactionReceipt,
@@ -472,7 +466,7 @@ where
         client_sig: impl Into<Bytes>,
         priority_gas: Option<u64>,
     ) -> Result<u64, MarketError> {
-        tracing::trace!("Calling requestIsLocked({:x})", request.id);
+        // tracing::trace!("Calling requestIsLocked({:x})", request.id);
         let is_locked_in: bool =
             self.instance.requestIsLocked(request.id).call().await.context("call failed")?;
         if is_locked_in {
@@ -480,76 +474,58 @@ where
         }
 
         let client_sig_bytes = client_sig.into();
-        tracing::trace!("Calling lockRequest({:x?}, {:x?})", request, client_sig_bytes);
+        // tracing::trace!("Calling lockRequest({:x?}, {:x?})", request, client_sig_bytes);
 
         let mut call =
             self.instance.lockRequest(request.clone(), client_sig_bytes).from(self.caller);
 
-        // if let Some(gas) = priority_gas {
-        //     let priority_fee = self
-        //         .instance
-        //         .provider()
-        //         .estimate_eip1559_fees()
-        //         .await
-        //         .context("Failed to get priority gas fee")?;
-        //
-        //     call = call
-        //         .max_fee_per_gas(priority_fee.max_fee_per_gas + gas as u128)
-        //         .max_priority_fee_per_gas(priority_fee.max_priority_fee_per_gas + gas as u128);
-        // }
 
-        let start = chrono::Utc::now();
-        tracing::info!("BOUNDLESS_MARKET.RS - Starting lock_request for {:x} at {:?}", request.id, Self::format_time(start));
+        let start_time = chrono::Utc::now();
+        tracing::info!(" -- GAS HESAPLANMADAN HEMEN ONCE : {} - ORDER ID : 0x{:x}", Self::format_time(start_time), request.id);
+        if let Some(gas) = priority_gas {
+            // Cache'den gas fee'leri al veya güncelle
+            let (max_fee_per_gas, max_priority_fee_per_gas) = {
+                let mut cache = self.gas_price_cache.lock().await;
 
-        tracing::info!("--- if let Some(extra_gas) = priority_gas ----");
-        if let Some(extra_gas) = priority_gas {
-            tracing::info!("--- Some(extra_gas) = priority_gas ----");
-            let ttl = Duration::from_secs(600); // 10 dakika
+                // Cache 10 dakika (600 saniye) geçerliliği kontrol et
+                if cache.is_expired(Duration::from_secs(600)) {
+                    tracing::trace!("Gas price cache expired, updating...");
+                    cache.update(&self.provider).await.context("Failed to update gas price cache")?;
+                } else {
+                    tracing::trace!("---- USING CACHED GAS PRICE ------");
+                }
+                let gas_cache_time = chrono::Utc::now();
+                tracing::info!(" -- GAS CACHEDEN GELDI : {} - ORDER ID : 0x{:x}", Self::format_time(gas_cache_time), request.id);
+                cache.get()
+            };
 
-            let mut cache = self.gas_price_cache.lock().await;
+            let last_max_fee_per_gas = max_fee_per_gas + gas as u128;
+            let last_max_priority_fee_per_gas = max_priority_fee_per_gas + gas as u128;
 
-            if cache.is_expired(ttl) {
-                tracing::info!("--- CACHE IS EXPIRED AND WILL BE UPDATE FROM CHAIN ----");
-                cache.update(&self.provider).await?;
-            }
 
-            tracing::info!("--- CACHE UPDATED IF ABOVE LOG -IS EXPIRED- IF NOT CACHE WAS ALREADY EXISTED ----");
+            tracing::trace!("Call icine koyulan max_fee_per_gas : {}", last_max_fee_per_gas);
+            tracing::trace!("Call icine koyulan max_fee_per_gas : {}", last_max_priority_fee_per_gas);
 
-            let (max_fee, max_priority_fee) = cache.get();
-
-            // Burada call objene max_fee ve max_priority_fee ekle
-            tracing::info!(
-                "---- CACHEDEN FEE Using fees max_fee: {}, max_priority_fee: {} (with extra gas {})",
-                max_fee + extra_gas as u128,
-                max_priority_fee + extra_gas as u128,
-                extra_gas
-            );
+            call = call
+                .max_fee_per_gas(last_max_fee_per_gas)
+                .max_priority_fee_per_gas(last_max_priority_fee_per_gas);
         }
-        tracing::info!("--------- GAS CECHEDEN ALINDI ---------");
 
-        let order_received_time = chrono::Utc::now();
-        println!("________________________________________________________________");
-        println!("                ");
-        println!("                ");
-        tracing::info!("---- BOUNDLESS_MARKET.RS ORDER RECEIVED - Starting lock_request for {:x} at {} : ", request.id, Self::format_time(order_received_time));
-        println!("                ");
-        println!("                ");
-        println!("________________________________________________________________");
-
-        // tracing::info!("Sending tx {}", format!("{:?}", call));
+        let tx_send_start_time = chrono::Utc::now();
+        tracing::info!(" -- TX ATIYORUM HAZIR OL : {} - ORDER ID : 0x{:x}", Self::format_time(tx_send_start_time), request.id);
+        tracing::trace!("Sending tx {}", format!("{:?}", call));
         let pending_tx = call.send().await?;
 
-        let broadcasting_start_time = chrono::Utc::now();
-        tracing::info!("Broadcasting ORDER {:x} at {}", request.id, Self::format_time(broadcasting_start_time));
+        let tx_pending_start_time = chrono::Utc::now();
+        tracing::info!(" -- TX ATILDI PENDING : {} - ORDER ID : 0x{:x}", Self::format_time(tx_pending_start_time), request.id);
+
         let tx_hash = *pending_tx.tx_hash();
-        let broadcasting_end_time = chrono::Utc::now();
-        tracing::info!("Broadcasted ORDER {:x} at {}", request.id, Self::format_time(broadcasting_start_time));
-        tracing::info!("Broadcasting lock request tx {:x} at {}", tx_hash, Self::format_time(broadcasting_end_time));
+        tracing::trace!("Broadcasting lock request tx {}", tx_hash);
+
+        let tx_end_time = chrono::Utc::now();
+        tracing::info!(" -- TX ATILDI BITTI : {} - ORDER ID : 0x{:x}", Self::format_time(tx_end_time), request.id);
 
         let receipt = self.get_receipt_with_retry(pending_tx).await?;
-
-        let end = chrono::Utc::now();
-        tracing::info!("BOUNDLESS_MARKET.RS - Finished lock_request for {:x} at {:?}", request.id, Self::format_time(end));
 
         if !receipt.status() {
             // TODO: Get + print revertReason
@@ -562,87 +538,11 @@ where
             receipt.transaction_hash
         );
 
-
         self.check_stake_balance().await?;
 
         Ok(receipt.block_number.context("TXN Receipt missing block number")?)
     }
 
-
-    pub async fn lock_request_fast(
-        &self,
-        request: &ProofRequest,
-        client_sig: impl Into<Bytes>,
-        extra_gas: u64,
-    ) -> Result<u64, MarketError>
-    where
-        P: 'static,
-    {
-        let start = chrono::Utc::now();
-
-        let client_sig_bytes = client_sig.into();
-
-        // 🔥 SKIP LOCK CHECK - assume caller already checked
-        // let is_locked_in: bool = self.instance.requestIsLocked(request.id).call().await.context("call failed")?;
-
-        let mut call = self.instance.lockRequest(request.clone(), client_sig_bytes).from(self.caller);
-
-        // 🔥 FAST GAS: Use cached values without update check
-        let cache = self.gas_price_cache.lock().await;
-        let (max_fee, max_priority_fee) = cache.get_cached_or_default(extra_gas);
-        drop(cache); // Release lock immediately
-
-        call = call
-            .max_fee_per_gas(max_fee)
-            .max_priority_fee_per_gas(max_priority_fee);
-
-        tracing::info!("⚡ FAST LOCK {:x} with gas fees: max={}, priority={}",
-               request.id, max_fee, max_priority_fee);
-
-        // 🔥 IMMEDIATE SEND
-        let pending_tx = call.send().await?;
-        let tx_hash = *pending_tx.tx_hash();
-
-        let send_time = chrono::Utc::now();
-        let send_duration = send_time.signed_duration_since(start).num_milliseconds();
-
-        tracing::info!("⚡ FAST LOCK {:x} sent in {}ms, tx: {:x}",
-               request.id, send_duration, tx_hash);
-
-        // 🔥 FAST RECEIPT - with shorter timeout
-        let receipt = self.get_receipt_with_retry_fast(pending_tx).await?;
-
-        let end = chrono::Utc::now();
-        let total_duration = end.signed_duration_since(start).num_milliseconds();
-
-        tracing::info!("⚡ FAST LOCK {:x} completed in {}ms", request.id, total_duration);
-
-        if !receipt.status() {
-            return Err(MarketError::LockRevert(receipt.transaction_hash));
-        }
-
-        // 🔥 ASYNC BALANCE CHECK - don't wait for it
-        let service_clone = self.clone();
-        let _handle = tokio::spawn(async move {
-            if let Err(e) = service_clone.check_stake_balance().await {
-                tracing::warn!("Async balance check failed: {:?}", e);
-            }
-        });
-
-        Ok(receipt.block_number.context("TXN Receipt missing block number")?)
-    }
-
-    /// Fast receipt getter with shorter timeouts
-    async fn get_receipt_with_retry_fast(&self, pending_tx: PendingTransactionBuilder<alloy::network::Ethereum>) -> Result<TransactionReceipt, MarketError> {
-        // Daha kısa timeout ile hızlı receipt alma
-        let receipt = pending_tx
-            .with_timeout(Some(Duration::from_secs(30))) // Normal: 60s, Fast: 30s
-            .get_receipt()
-            .await
-            .map_err(|e| MarketError::TxnConfirmationError(anyhow::anyhow!("Failed to get receipt: {:?}", e)))?;
-
-        Ok(receipt)
-    }
 
     /// Lock the request to the prover, giving them exclusive rights to be paid to
     /// fulfill this request, and also making them subject to slashing penalties if they fail to

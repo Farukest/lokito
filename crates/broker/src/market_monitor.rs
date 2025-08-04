@@ -370,6 +370,7 @@ where
         let pre_lock_time = chrono::Utc::now();
         println!("                                   ");
         println!("                                   ");
+        println!("🚀 ORDER ID : 0x{:x} ", request_id);
         println!("🚀 CHAIN_ID : {} ", chain_id);
         println!("🚀 CUZDANIM : {} ", prover_addr);
         println!("                                   ");
@@ -377,7 +378,7 @@ where
         println!("🚀 LOCK REQUEST STARTING FOR ORDER 0x{:x}", request_id);
         println!("                                   ");
         println!("                                   ");
-        match boundless.lock_request_fast(&proof_request.clone(), client_signature.clone(), lockin_priority_gas.unwrap_or(500000)).await {
+        match boundless.lock_request(&proof_request.clone(), client_signature.clone(), lockin_priority_gas).await {
             Ok(lock_block) => {
 
                 let lock_timestamp = crate::futures_retry::retry(
