@@ -98,7 +98,7 @@ where
         config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
-        boundless_service: BoundlessMarketService<Arc<P>>,  // Ekle
+        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
     ) -> std::result::Result<(), MarketMonitorErr> {
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
 
@@ -127,7 +127,7 @@ where
                         db_obj.clone(),
                         prover_addr,
                         &mut seen_tx_hashes,
-                        boundless_service.clone(),
+                        boundless_service,
                     ).await {
                         tracing::debug!("Error getting mempool content: {:?}", e);
                     }
@@ -144,7 +144,7 @@ where
         db_obj: DbObj,
         prover_addr: Address,
         seen_tx_hashes: &mut std::collections::HashSet<B256>,
-        boundless_service: BoundlessMarketService<Arc<P>>,  // Ekle
+        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
     ) -> Result<()> {
         // HTTP request - exactly like Node.js fetch
         let client = reqwest::Client::new();
@@ -174,7 +174,7 @@ where
                 db_obj,
                 prover_addr,
                 seen_tx_hashes,
-                boundless_service
+                &boundless_service,
             ).await?;
         }
 
@@ -189,7 +189,7 @@ where
         db_obj: DbObj,
         prover_addr: Address,
         seen_tx_hashes: &mut std::collections::HashSet<B256>,
-        boundless_service: BoundlessMarketService<Arc<P>>,  // Ekle
+        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
             // First filter by FROM address (like Node.js FROM_FILTER)
@@ -230,7 +230,7 @@ where
                                                     config.clone(),
                                                     db_obj.clone(),
                                                     prover_addr,
-                                                    boundless_service.clone(),
+                                                    &boundless_service,
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
@@ -255,7 +255,7 @@ where
         config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
-        boundless_service: BoundlessMarketService<Arc<P>>,  // Ekle
+        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
     ) -> Result<()> {
         // Get transaction details
         // tx_data'dan input'u direkt al
@@ -433,7 +433,7 @@ where
                 config,
                 db,
                 prover_addr,
-                boundless_service
+                &boundless_service,  // Reference ver
             )
                 .await
                 .map_err(SupervisorErr::Recover)?;
