@@ -255,6 +255,10 @@ pub struct MarketConf {
 
     /// MIN LOCKOUT TIME THAT ACCEPT WHILE ORDER
     pub min_lock_out_time: u64,
+
+    pub my_rpc_url: String,
+
+    pub lock_delay_ms: Option<u64>,
 }
 
 impl Default for MarketConf {
@@ -263,6 +267,8 @@ impl Default for MarketConf {
         #[allow(deprecated)]
         Self {
             mcycle_price: "0.00001".to_string(),
+            my_rpc_url: "wss://muddy-convincing-cloud.base-mainnet.quiknode.pro/14f24f3da2c7fd37dd3b2022e8a0a13abedb41f8/".to_string(),
+            lock_delay_ms: Some(0),  // Default 0ms delay
             mcycle_price_stake_token: "0.001".to_string(),
             assumption_price: None,
             max_mcycle_limit: None,
@@ -673,7 +679,9 @@ error = ?"#;
         let config = Config::load(config_temp.path()).await.unwrap();
 
         assert_eq!(config.market.mcycle_price, "0.1");
+        assert_eq!(config.market.my_rpc_url, "wss://muddy-convincing-cloud.base-mainnet.quiknode.pro/14f24f3da2c7fd37dd3b2022e8a0a13abedb41f8/");
         assert_eq!(config.market.assumption_price, None);
+        assert_eq!(config.market.lock_delay_ms, Some(0));
         assert_eq!(config.market.peak_prove_khz, Some(500));
         assert_eq!(config.market.min_deadline, 300);
         assert_eq!(config.market.min_lock_out_time, 40);

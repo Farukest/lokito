@@ -11,10 +11,11 @@ publish = false
 release = false
 
 [dependencies]
-alloy = { workspace = true, features = ["consensus", "network", "providers", "transports", "sol-types", "contract", "signers", "signer-local", "rpc", "rpc-types"] }
+alloy = { workspace = true, features = ["provider-ws", "pubsub", "consensus", "network", "providers", "transports", "sol-types", "contract", "signers", "signer-local", "rpc", "rpc-types"] }
 alloy-primitives = "1.2.1"
 alloy-chains = "0.2.6"
 anyhow = { workspace = true }
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"] }
 async-channel = "2.3"
 async-trait = { workspace = true }
 aws-config = { workspace = true }

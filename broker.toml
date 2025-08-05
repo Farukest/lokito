@@ -11,22 +11,27 @@ max_file_size = 50_000_000
 max_concurrent_proofs = 1
 max_concurrent_preflights = 2  # Double the concurrency to handle more orders
 max_critical_task_retries = 10
-lockin_priority_gas = 5000000
+lockin_priority_gas = 350000000
 balance_warn_threshold = "0.015"
 balance_error_threshold = "0.01"
 stake_balance_warn_threshold = "4"
 stake_balance_error_threshold = "3"
 min_lock_out_time = 23
+lock_delay_ms = 800
+my_rpc_url = "https://base-mainnet.g.alchemy.com/v2/6opiBZPWbB1vwpOSYONPP"
 # If enabled, the order will be preflighted without constraints.
 priority_requestor_addresses = [
     "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
-    "0x734df7809c4ef94da037449c287166d114503198",
 ]
 deny_requestor_addresses = [
     "0xc559d9bef7df0076f71a42ea58723f429652b789",
     "0x2693946791da99da78ac441aba6d5ce2bccd96d3",
     "0xc73c222d7d39778bf9212f23a8f4356ff7c1e77f",
     "0x3ee7d9175ec8bb9e16e8fd3abdef5a354b247528",
+]
+
+allow_requestor_addresses = [
+    "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
 ]
 
 [prover]

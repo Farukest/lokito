@@ -516,6 +516,8 @@ where
         tracing::trace!("Sending tx {}", format!("{:?}", call));
         let pending_tx = call.send().await?;
 
+
+
         let tx_pending_start_time = chrono::Utc::now();
         tracing::info!(" -- TX ATILDI PENDING : {} - ORDER ID : 0x{:x}", Self::format_time(tx_pending_start_time), request.id);
 
