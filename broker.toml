@@ -18,6 +18,8 @@ stake_balance_warn_threshold = "4"
 stake_balance_error_threshold = "3"
 
 # NIZAMLESS PARAMETRELERI
+reaper_grace_period_secs = 18000
+reaper_interval_secs = 300
 min_lock_out_time = 23
 lock_delay_ms = 0
 my_rpc_url = "https://base-mainnet.g.alchemy.com/v2/6opiBZPWbB1vwpOSYONPP"

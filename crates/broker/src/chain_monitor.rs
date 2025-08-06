@@ -115,72 +115,77 @@ where
     P: Provider + 'static + Clone,
 {
     type Error = ChainMonitorErr;
-    fn spawn(&self, cancel_token: CancellationToken) -> RetryRes<Self::Error> {
-        let self_clone = self.clone();
-
-        Box::pin(async move {
-            tracing::info!("Starting ChainMonitor service");
-
-            let chain_id = self_clone
-                .provider
-                .get_chain_id()
-                .await
-                .context("failed to get chain ID")
-                .map_err(ChainMonitorErr::UnexpectedErr)
-                .map_err(SupervisorErr::Recover)?;
-
-            let chain_poll_time = NamedChain::try_from(chain_id)
-                .ok()
-                .and_then(|chain| chain.average_blocktime_hint())
-                .map(|block_time| block_time.mul_f32(0.6))
-                .unwrap_or(Duration::from_secs(2));
-
-            loop {
-                tokio::select! {
-                    // Wait for notification or handle cancellation
-                    _ = self_clone.update_notifier.notified() => {
-                        // Needs update, lock next update value to avoid unnecessary notifications.
-                        let mut next_update = self_clone.next_update.write().await;
-
-                        // Get the lastest block and gas price.
-                        let (block_res, gas_price_res) = tokio::join!(
-                            self_clone.provider.get_block_by_number(BlockNumberOrTag::Latest),
-                            self_clone.provider.get_gas_price()
-                        );
-
-                        let block = block_res
-                            .context("failed to latest block")
-                            .map_err(ChainMonitorErr::RpcErr)
-                            .map_err(SupervisorErr::Recover)?
-                            .context("failed to fetch latest block: no block in response")
-                            .map_err(ChainMonitorErr::UnexpectedErr)
-                            .map_err(SupervisorErr::Recover)?;
-                        let head = ChainHead {
-                            block_number: block.header.number,
-                            block_timestamp: block.header.timestamp,
-                        };
-                        let _ = self_clone.head_update.send_replace(head);
-
-                        let gas_price = gas_price_res
-                            .context("failed to get gas price")
-                            .map_err(ChainMonitorErr::RpcErr)
-                            .map_err(SupervisorErr::Recover)?;
-                        let _ = self_clone.gas_price.send_replace(gas_price);
-
-                        // Set timestamp for next update
-                        *next_update = Instant::now() + chain_poll_time;
-                    }
-                    // Handle cancellation
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("Chain monitor received cancellation, shutting down gracefully");
-                        break;
-                    }
-                }
-            }
-
-            Ok(())
-        })
+    fn spawn(&self, _cancel_token: CancellationToken) -> RetryRes<Self::Error> {
+        // Do nothing, hemen başarılı dön
+        Box::pin(async { Ok(()) })
     }
+
+    // fn spawn(&self, cancel_token: CancellationToken) -> RetryRes<Self::Error> {
+    //     let self_clone = self.clone();
+    //
+    //     Box::pin(async move {
+    //         tracing::info!("Starting ChainMonitor service");
+    //
+    //         let chain_id = self_clone
+    //             .provider
+    //             .get_chain_id()
+    //             .await
+    //             .context("failed to get chain ID")
+    //             .map_err(ChainMonitorErr::UnexpectedErr)
+    //             .map_err(SupervisorErr::Recover)?;
+    //
+    //         let chain_poll_time = NamedChain::try_from(chain_id)
+    //             .ok()
+    //             .and_then(|chain| chain.average_blocktime_hint())
+    //             .map(|block_time| block_time.mul_f32(0.6))
+    //             .unwrap_or(Duration::from_secs(2));
+    //
+    //         loop {
+    //             tokio::select! {
+    //                 // Wait for notification or handle cancellation
+    //                 _ = self_clone.update_notifier.notified() => {
+    //                     // Needs update, lock next update value to avoid unnecessary notifications.
+    //                     let mut next_update = self_clone.next_update.write().await;
+    //
+    //                     // Get the lastest block and gas price.
+    //                     let (block_res, gas_price_res) = tokio::join!(
+    //                         self_clone.provider.get_block_by_number(BlockNumberOrTag::Latest),
+    //                         self_clone.provider.get_gas_price()
+    //                     );
+    //
+    //                     let block = block_res
+    //                         .context("failed to latest block")
+    //                         .map_err(ChainMonitorErr::RpcErr)
+    //                         .map_err(SupervisorErr::Recover)?
+    //                         .context("failed to fetch latest block: no block in response")
+    //                         .map_err(ChainMonitorErr::UnexpectedErr)
+    //                         .map_err(SupervisorErr::Recover)?;
+    //                     let head = ChainHead {
+    //                         block_number: block.header.number,
+    //                         block_timestamp: block.header.timestamp,
+    //                     };
+    //                     let _ = self_clone.head_update.send_replace(head);
+    //
+    //                     let gas_price = gas_price_res
+    //                         .context("failed to get gas price")
+    //                         .map_err(ChainMonitorErr::RpcErr)
+    //                         .map_err(SupervisorErr::Recover)?;
+    //                     let _ = self_clone.gas_price.send_replace(gas_price);
+    //
+    //                     // Set timestamp for next update
+    //                     *next_update = Instant::now() + chain_poll_time;
+    //                 }
+    //                 // Handle cancellation
+    //                 _ = cancel_token.cancelled() => {
+    //                     tracing::debug!("Chain monitor received cancellation, shutting down gracefully");
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //
+    //         Ok(())
+    //     })
+    // }
 }
 
 #[cfg(test)]

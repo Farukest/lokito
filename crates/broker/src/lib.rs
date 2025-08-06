@@ -638,17 +638,17 @@ where
                 .context("Failed to initialize chain monitor")?,
         );
 
-        let cloned_chain_monitor = chain_monitor.clone();
-        let cloned_config = config.clone();
-        // Critical task, as is relied on to query current chain state
-        let cancel_token = critical_cancel_token.clone();
-        supervisor_tasks.spawn(async move {
-            Supervisor::new(cloned_chain_monitor, cloned_config, cancel_token)
-                .spawn()
-                .await
-                .context("Failed to start chain monitor")?;
-            Ok(())
-        });
+        // let cloned_chain_monitor = chain_monitor.clone();
+        // let cloned_config = config.clone();
+        // // Critical task, as is relied on to query current chain state
+        // let cancel_token = critical_cancel_token.clone();
+        // supervisor_tasks.spawn(async move {
+        //     Supervisor::new(cloned_chain_monitor, cloned_config, cancel_token)
+        //         .spawn()
+        //         .await
+        //         .context("Failed to start chain monitor")?;
+        //     Ok(())
+        // });
 
         let chain_id = self.provider.get_chain_id().await.context("Failed to get chain ID")?;
         let client = self
@@ -666,7 +666,7 @@ where
             .transpose()?;
 
         // Create a channel for new orders to be sent to the OrderPicker / from monitors
-        let (new_order_tx, new_order_rx) = mpsc::channel(NEW_ORDER_CHANNEL_CAPACITY);
+        // let (new_order_tx, new_order_rx) = mpsc::channel(NEW_ORDER_CHANNEL_CAPACITY);
 
         // Create a broadcast channel for order state change messages
         let (order_state_tx, _) = tokio::sync::broadcast::channel(ORDER_STATE_CHANNEL_CAPACITY);
@@ -702,16 +702,17 @@ where
             self.deployment().boundless_market_address,
             self.provider.clone(),
             self.config_watcher.config.clone(),
-            chain_monitor.clone(),
+            // chain_monitor.clone(),
             self.db.clone(),
             self.args.private_key.address(),
+            prover.clone(),
         ));
 
 
-        let block_times =
-            market_monitor.get_block_time().await.context("Failed to sample block times")?;
+        // let block_times =
+        //     market_monitor.get_block_time().await.context("Failed to sample block times")?;
 
-        tracing::debug!("Estimated block time: {block_times}");
+        // tracing::debug!("Estimated block time: {block_times}");
 
         let cloned_config = config.clone();
         let cancel_token = non_critical_cancel_token.clone();
@@ -724,64 +725,64 @@ where
         });
 
 
-        // spin up a supervisor for the offchain market monitor
-        if let Some(client_clone) = client {
-            let offchain_market_monitor =
-                Arc::new(offchain_market_monitor::OffchainMarketMonitor::new(
-                    client_clone,
-                    self.args.private_key.clone(),
-                    new_order_tx.clone(),
-                    self.args.private_key.address(),
-                    self.provider.clone(),
-                    self.db.clone(),
-                    prover.clone(),
-                    self.config_watcher.config.clone()
-                ));
-            let cloned_config = config.clone();
-            let cancel_token = non_critical_cancel_token.clone();
-            supervisor_tasks.spawn(async move {
-                Supervisor::new(offchain_market_monitor, cloned_config, cancel_token)
-                    .spawn()
-                    .await
-                    .context("Failed to start offchain market monitor")?;
-                Ok(())
-            });
-        }
+        // // spin up a supervisor for the offchain market monitor
+        // if let Some(client_clone) = client {
+        //     let offchain_market_monitor =
+        //         Arc::new(offchain_market_monitor::OffchainMarketMonitor::new(
+        //             client_clone,
+        //             self.args.private_key.clone(),
+        //             new_order_tx.clone(),
+        //             self.args.private_key.address(),
+        //             self.provider.clone(),
+        //             self.db.clone(),
+        //             prover.clone(),
+        //             self.config_watcher.config.clone()
+        //         ));
+        //     let cloned_config = config.clone();
+        //     let cancel_token = non_critical_cancel_token.clone();
+        //     supervisor_tasks.spawn(async move {
+        //         Supervisor::new(offchain_market_monitor, cloned_config, cancel_token)
+        //             .spawn()
+        //             .await
+        //             .context("Failed to start offchain market monitor")?;
+        //         Ok(())
+        //     });
+        // }
 
 
-        let (pricing_tx, pricing_rx) = mpsc::channel(PRICING_CHANNEL_CAPACITY);
+        // let (c, pricing_rx) = mpsc::channel(PRICING_CHANNEL_CAPACITY);
 
-        let stake_token_decimals = BoundlessMarketService::new(
-            self.deployment().boundless_market_address,
-            self.provider.clone(),
-            Address::ZERO,
-        )
-        .stake_token_decimals()
-        .await
-        .context("Failed to get stake token decimals. Possible RPC error.")?;
+        // let stake_token_decimals = BoundlessMarketService::new(
+        //     self.deployment().boundless_market_address,
+        //     self.provider.clone(),
+        //     Address::ZERO,
+        // )
+        //     .stake_token_decimals()
+        //     .await
+        //     .context("Failed to get stake token decimals. Possible RPC error.")?;
 
         // Spin up the order picker to pre-flight and find orders to lock
-        let order_picker = Arc::new(order_picker::OrderPicker::new(
-            self.db.clone(),
-            config.clone(),
-            prover.clone(),
-            self.deployment().boundless_market_address,
-            self.provider.clone(),
-            chain_monitor.clone(),
-            new_order_rx,
-            pricing_tx,
-            stake_token_decimals,
-            order_state_tx.clone(),
-        ));
-        let cloned_config = config.clone();
-        let cancel_token = non_critical_cancel_token.clone();
-        supervisor_tasks.spawn(async move {
-            Supervisor::new(order_picker, cloned_config, cancel_token)
-                .spawn()
-                .await
-                .context("Failed to start order picker")?;
-            Ok(())
-        });
+        // let order_picker = Arc::new(order_picker::OrderPicker::new(
+        //     self.db.clone(),
+        //     config.clone(),
+        //     prover.clone(),
+        //     self.deployment().boundless_market_address,
+        //     self.provider.clone(),
+        //     chain_monitor.clone(),
+        //     new_order_rx,
+        //     pricing_tx,
+        //     stake_token_decimals,
+        //     order_state_tx.clone(),
+        // ));
+        // let cloned_config = config.clone();
+        // let cancel_token = non_critical_cancel_token.clone();
+        // supervisor_tasks.spawn(async move {
+        //     Supervisor::new(order_picker, cloned_config, cancel_token)
+        //         .spawn()
+        //         .await
+        //         .context("Failed to start order picker")?;
+        //     Ok(())
+        // });
 
         let proving_service = Arc::new(
             proving::ProvingService::new(
@@ -790,8 +791,8 @@ where
                 config.clone(),
                 order_state_tx.clone(),
             )
-            .await
-            .context("Failed to initialize proving service")?,
+                .await
+                .context("Failed to initialize proving service")?,
         );
 
         let cloned_config = config.clone();
@@ -806,30 +807,30 @@ where
 
         let prover_addr = self.args.private_key.address();
 
-        let order_monitor = Arc::new(order_monitor::OrderMonitor::new(
-            self.db.clone(),
-            self.provider.clone(),
-            chain_monitor.clone(),
-            config.clone(),
-            block_times,
-            prover_addr,
-            self.deployment().boundless_market_address,
-            pricing_rx,
-            stake_token_decimals,
-            order_monitor::RpcRetryConfig {
-                retry_count: self.args.rpc_retry_max.into(),
-                retry_sleep_ms: self.args.rpc_retry_backoff,
-            },
-        )?);
-        let cloned_config = config.clone();
-        let cancel_token = non_critical_cancel_token.clone();
-        supervisor_tasks.spawn(async move {
-            Supervisor::new(order_monitor, cloned_config, cancel_token)
-                .spawn()
-                .await
-                .context("Failed to start order monitor")?;
-            Ok(())
-        });
+        // let order_monitor = Arc::new(order_monitor::OrderMonitor::new(
+        //     self.db.clone(),
+        //     self.provider.clone(),
+        //     chain_monitor.clone(),
+        //     config.clone(),
+        //     block_times,
+        //     prover_addr,
+        //     self.deployment().boundless_market_address,
+        //     pricing_rx,
+        //     stake_token_decimals,
+        //     order_monitor::RpcRetryConfig {
+        //         retry_count: self.args.rpc_retry_max.into(),
+        //         retry_sleep_ms: self.args.rpc_retry_backoff,
+        //     },
+        // )?);
+        // let cloned_config = config.clone();
+        // let cancel_token = non_critical_cancel_token.clone();
+        // supervisor_tasks.spawn(async move {
+        //     Supervisor::new(order_monitor, cloned_config, cancel_token)
+        //         .spawn()
+        //         .await
+        //         .context("Failed to start order monitor")?;
+        //     Ok(())
+        // });
 
         let set_builder_img_id = self.fetch_and_upload_set_builder_image(&prover).await?;
         let assessor_img_id = self.fetch_and_upload_assessor_image(&prover).await?;
@@ -845,8 +846,8 @@ where
                 config.clone(),
                 prover.clone(),
             )
-            .await
-            .context("Failed to initialize aggregator service")?,
+                .await
+                .context("Failed to initialize aggregator service")?,
         );
 
         let cloned_config = config.clone();
@@ -956,7 +957,7 @@ where
         critical_cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error> {
         // 2 hour max to shutdown time, to avoid indefinite shutdown time.
-        const SHUTDOWN_GRACE_PERIOD_SECS: u32 = 2 * 60 * 60;
+        const SHUTDOWN_GRACE_PERIOD_SECS: u32 = 5 * 60 * 60;
         const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
 
         let start_time = std::time::Instant::now();

@@ -540,7 +540,7 @@ where
             receipt.transaction_hash
         );
 
-        self.check_stake_balance().await?;
+        // self.check_stake_balance().await?;
 
         Ok(receipt.block_number.context("TXN Receipt missing block number")?)
     }
