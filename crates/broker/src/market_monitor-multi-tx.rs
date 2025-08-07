@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+use tokio::sync::Semaphore;
 use std::sync::Arc;
 use crate::order_monitor::OrderMonitorErr;
 use alloy::{
@@ -24,6 +24,7 @@ use alloy::{
 
 use alloy::rpc::types::Transaction;
 use alloy::consensus::Transaction as _;
+use alloy_primitives::{Bytes, U256};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use boundless_market::{
@@ -58,7 +59,8 @@ impl CodedError for MarketMonitorErr {
         }
     }
 }
-
+// 🎯 GLOBAL SEMAPHORE - Max 3 concurrent order
+static MARKET_PROCESSING_SEMAPHORE: Semaphore = Semaphore::const_new(3);
 impl_coded_debug!(MarketMonitorErr);
 
 pub struct MarketMonitor<P> {
@@ -271,13 +273,15 @@ where
         boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
         prover : ProverObj
     ) -> Result<()> {
+        // 🔒 Permit al - max 3 order aynı anda işlensin
+        let _permit = MARKET_PROCESSING_SEMAPHORE.acquire().await
+            .map_err(|e| anyhow::anyhow!("Failed to acquire processing permit: {}", e))?;
 
         // Get transaction details
         // tx_data'dan input'u direkt al
         let input_hex = tx_data.get("input")
             .and_then(|i| i.as_str())
             .ok_or_else(|| anyhow::anyhow!("No input in tx data"))?;
-
 
         let input_bytes = hex::decode(&input_hex[2..])?; // 0x prefix'i kaldır
 
@@ -293,30 +297,7 @@ where
         let client_addr = decoded.request.client_address();
         let request_id = decoded.request.id;
 
-
-        // 1. DB’den commit edilmiş orderları çek
-        let committed_orders = db_obj.get_committed_orders().await
-            .map_err(|e| MarketMonitorErr::UnexpectedErr(e.into()))?;
-
-
-        let committed_count = committed_orders.len();
-
-        let max_capacity = Some(1); // Konfigürasyondan da alınabilir
-        if let Some(max_capacity) = max_capacity {
-            if committed_count as u32 >= max_capacity {
-                tracing::info!("committed_count as u32 >= max_capacity");
-                tracing::info!("Committed orders count ({}) reached max concurrency limit ({}), skipping lock for order {:?}",
-                    committed_count,
-                    max_capacity,
-                    request_id
-                );
-                tracing::info!("return Ok(())");
-                return Ok(()); // Yeni order locklama yapılmaz
-            }
-        }
-
-
-        tracing::info!("📋 Processing submitRequest:");
+        tracing::info!("📋 Processing submitRequest (permit acquired):");
         tracing::info!("   - Request ID: 0x{:x}", request_id);
         tracing::info!("   - Client: 0x{:x}", client_addr);
 
@@ -328,7 +309,6 @@ where
                 locked_conf.market.lock_delay_ms
             )
         };
-
 
         if let Some(allow_addresses) = allowed_requestors_opt {
             if !allow_addresses.contains(&client_addr) {
@@ -356,15 +336,25 @@ where
             locked_conf.market.lockin_priority_gas
         };
 
+        // 1. DB'den commit edilmiş orderları çek
+        let committed_orders = db_obj.get_committed_orders().await
+            .map_err(|e| MarketMonitorErr::UnexpectedErr(e.into()))?;
 
+        let committed_count = committed_orders.len();
 
-        // 🎯 TIMESTAMP'LERİ SET ET
-        // new_order.target_timestamp = Some(decoded.request.lock_expires_at());
-        // new_order.expire_timestamp = Some(decoded.request.expires_at());
-        //
-        // tracing::info!("📊 Order timestamps calculated:");
-        // tracing::info!("   - Target (Lock expires): {}", new_order.target_timestamp.unwrap());
-        // tracing::info!("   - Expire (Order expires): {}", new_order.expire_timestamp.unwrap());
+        let max_capacity = Some(3); // 🔧 3 concurrent order limit
+        if let Some(max_capacity) = max_capacity {
+            if committed_count as u32 >= max_capacity {
+                tracing::info!("committed_count as u32 >= max_capacity");
+                tracing::info!("Committed orders count ({}) reached max concurrency limit ({}), skipping lock for order {:?}",
+                    committed_count,
+                    max_capacity,
+                    request_id
+                );
+                tracing::info!("return Ok(())");
+                return Ok(()); // Yeni order locklama yapılmaz
+            }
+        }
 
         tracing::info!("🚀 Attempting to lock request: 0x{:x}", request_id);
         // CONFIG DELAY
@@ -373,16 +363,19 @@ where
             tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
         }
 
+        // ✅ PARALLEL LOCK ATTEMPTS
+        let lock_result = Self::parallel_lock_attempts(
+            boundless_service,
+            decoded.request,
+            decoded.clientSignature.clone(),
+            lockin_priority_gas,
+            request_id,
+            lock_delay_ms,
+        ).await;
 
-        // new_order.image_id = Some(Self::normalize_hex_data(&decoded.requirements.imageId));
-
-        match boundless_service.lock_request(&decoded.request, decoded.clientSignature.clone(), lockin_priority_gas).await {
+        match lock_result {
             Ok(lock_block) => {
                 tracing::info!("✅ Successfully locked request: 0x{:x} at block {}", request_id, lock_block);
-
-                // RPC senkronizasyonu için küçük bir gecikme ekle
-                tracing::info!("⏳ Waiting for RPC to sync lock block...");
-                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // 500 ms bekleme
 
                 // Calculate lock price and save to DB
                 let lock_timestamp = provider
@@ -399,9 +392,7 @@ where
                     .price_at(lock_timestamp)
                     .context("Failed to calculate lock price")?;
 
-
                 let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), input_hex).await {
-
                     Ok(confirmed_request) => {
                         tracing::info!("✅ Got CONFIRMED data, creating updated order: 0x{:x}", request_id);
 
@@ -413,33 +404,131 @@ where
                             market_addr,
                             chain_id,
                         );
-
+                        updated_order.target_timestamp = Some(updated_order.request.lock_expires_at());
+                        updated_order.expire_timestamp = Some(updated_order.request.expires_at());
 
                         updated_order
                     }
                     Err(e) => {
-                        tracing::info!("⚠️ Confirmed data fetch failed: {} - using mempool data", e);
+                        tracing::warn!("⚠️ Confirmed data fetch failed: {} - using mempool data", e);
                         new_order // Eski değerler kalsın
                     }
                 };
-
 
                 if let Err(e) = db_obj.insert_accepted_request(&final_order, lock_price).await {
                     tracing::error!("Failed to insert accepted request: {:?}", e);
                 }
             }
             Err(err) => {
-                tracing::info!("❌ Failed to lock request: 0x{:x}, error: {}", request_id, err);
+                tracing::warn!("❌ Failed to lock request: 0x{:x}, error: {}", request_id, err);
 
                 if let Err(e) = db_obj.insert_skipped_request(&new_order).await {
-                    tracing::info!("Failed to insert skipped request: {:?}", e);
+                    tracing::error!("Failed to insert skipped request: {:?}", e);
                 }
             }
         }
 
+        // 🔓 Permit otomatik olarak drop edilir, diğer order'lar işlenebilir
+        tracing::info!("📤 Processing completed for request: 0x{:x}, permit released", request_id);
         Ok(())
     }
 
+    // ✅ PARALLEL LOCK FUNCTION - İLK BAŞARILI OLAN WINS (Fixed abort logic)
+    async fn parallel_lock_attempts(
+        boundless_service: &BoundlessMarketService<Arc<P>>,
+        request: boundless_market::contracts::ProofRequest,
+        client_signature: alloy::primitives::Bytes,
+        lockin_priority_gas: Option<u64>,
+        request_id: U256,
+        config_delay_ms: Option<u64>,
+    ) -> Result<u64> {
+
+        // Attempt timing'leri - 2 saniyeye kadar
+        // let delays = [0u64, 10, 25, 50, 100, 200, 300, 500, 750, 1000, 1500, 2000];
+        let delays = [
+            0, 20, 40, 60, 80, 100, 120, 140, 160, 180,
+            200, 220, 240, 260, 280, 300, 320, 340, 360, 380,
+            400, 420, 440, 460, 480, 500, 520, 540, 560, 580,
+            600, 620, 640, 660, 680, 700, 720, 740, 760, 780,
+            800, 820, 840, 860, 880, 900, 920, 940, 960, 980,
+            1000, 1020, 1040, 1060, 1080, 1100
+        ];
+
+        // Config delay varsa ekle
+        let base_delay = config_delay_ms.unwrap_or(0);
+
+        let mut tasks = Vec::new();
+
+        for (i, &delay) in delays.iter().enumerate() {
+            let service = boundless_service.clone();
+            let req = request.clone();
+            let sig = client_signature.clone();
+            let total_delay = base_delay + delay;
+
+            let task = tokio::spawn(async move {
+                if total_delay > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(total_delay)).await;
+                }
+
+                tracing::debug!("🚀 Lock attempt {} ({}ms delay) for: 0x{:x}", i + 1, total_delay, request_id);
+                service.lock_request(&req, sig, lockin_priority_gas).await
+            });
+
+            tasks.push(task);
+        }
+
+        tracing::info!("🚀 Launched {} parallel lock attempts for: 0x{:x}", tasks.len(), request_id);
+
+        // İlk başarılı olan win eder
+        let mut last_error = None;
+
+        loop {
+            // Tüm task'ları kontrol et
+            let mut any_pending = false;
+
+            // 🔧 Finished task'ları bulup handle et
+            let mut i = 0;
+            while i < tasks.len() {
+                if tasks[i].is_finished() {
+                    let finished_task = tasks.remove(i); // Task'ı çıkar
+                    match finished_task.await {
+                        Ok(Ok(lock_block)) => {
+                            tracing::info!("⚡ LOCK SUCCESS attempt for: 0x{:x} at block {}", request_id, lock_block);
+
+                            // 🔧 Kalan tüm task'ları iptal et
+                            for remaining_task in tasks.into_iter() {
+                                remaining_task.abort();
+                            }
+
+                            return Ok(lock_block);
+                        }
+                        Ok(Err(err)) => {
+                            tracing::debug!("❌ Lock attempt failed: {}", err);
+                            last_error = Some(err);
+                            // i'yi artırma çünkü remove() yaptık
+                        }
+                        Err(join_err) => {
+                            tracing::debug!("❌ Task panicked: {}", join_err);
+                            // i'yi artırma çünkü remove() yaptık
+                        }
+                    }
+                } else {
+                    any_pending = true;
+                    i += 1; // Sadece pending task'larda i'yi artır
+                }
+            }
+
+            // Hiç pending task yoksa çık
+            if !any_pending {
+                break;
+            }
+
+            // Kısa bekle
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All lock attempts failed").into()).into())
+    }
     // Helper function (aynı kalır)
     // Input hex ile çalışan alternatif fonksiyon
     async fn fetch_confirmed_transaction_data_by_input(
@@ -457,7 +546,6 @@ where
 
         Ok(decoded_call.request)
     }
-
 
     fn format_time(dt: DateTime<Utc>) -> String {
         dt.format("%H:%M:%S%.3f").to_string()

@@ -4,7 +4,7 @@ mcycle_price_stake_token = "0.0001"
 peak_prove_khz = 800
 max_mcycle_limit = 14400
 max_journal_bytes = 10000
-min_deadline = 100
+min_deadline = 250
 lookback_blocks = 300
 max_stake = "5"
 max_file_size = 50_000_000
@@ -49,7 +49,7 @@ proof_retry_count = 8
 proof_retry_sleep_ms = 5000
 
 [batcher]
-batch_max_time = 1000
+batch_max_time = 120
 min_batch_size = 1
 block_deadline_buffer_secs = 180
 txn_timeout = 100
