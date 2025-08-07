@@ -381,14 +381,14 @@ where
                 tracing::info!("✅ Successfully locked request: 0x{:x} at block {}", request_id, lock_block);
 
                 // RPC senkronizasyonu için küçük bir gecikme ekle
-                tracing::info!("⏳ Waiting for RPC to sync lock block...");
+                tracing::info!("⏳⏳⏳⏳⏳⏳⏳⏳⏳ Waiting for RPC to sync lock block... ⏳⏳⏳⏳⏳⏳⏳⏳");
                 tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // 500 ms bekleme
 
                 // Calculate lock price and save to DB
                 let lock_timestamp = provider
                     .get_block_by_number(lock_block.into())
                     .await
-                    .context("Failed to get lock block")?
+                    .context("------------------------ lock_timestamp : Failed to get lock block.....")?
                     .context("Lock block not found")?
                     .header
                     .timestamp;
@@ -397,7 +397,7 @@ where
                     .request
                     .offer
                     .price_at(lock_timestamp)
-                    .context("Failed to calculate lock price")?;
+                    .context("------------------------ lock_price : Failed to calculate lock price.....")?;
 
 
                 let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), input_hex).await {
@@ -413,7 +413,8 @@ where
                             market_addr,
                             chain_id,
                         );
-
+                        updated_order.target_timestamp = Some(updated_order.request.lock_expires_at());
+                        updated_order.expire_timestamp = Some(updated_order.request.expires_at());
 
                         updated_order
                     }

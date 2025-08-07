@@ -28,8 +28,8 @@ x-exec-agent-common: &exec-agent-common
     <<: *base-environment
     LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
     RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
-    SEGMENT_SIZE: 20
-  entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-20} --redis-ttl ${REDIS_TTL:-57600}
+    SEGMENT_SIZE: 21
+  entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
 
 x-broker-environment: &broker-environment
   RUST_LOG: ${RUST_LOG:-info,broker=debug,boundless_market=debug}
