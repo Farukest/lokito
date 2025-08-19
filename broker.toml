@@ -17,7 +17,7 @@ balance_error_threshold = "0.01"
 stake_balance_warn_threshold = "4"
 stake_balance_error_threshold = "3"
 
-# VAST 8X OFLITO
+# VAST 8X LOKITO
 # NIZAMLESS PARAMETRELERI
 reaper_grace_period_secs = 18000
 reaper_interval_secs = 300
@@ -28,12 +28,14 @@ block_number = 34291052
 my_rpc_url = "https://few-intensive-layer.base-mainnet.quiknode.pro/219e37029c041b5aa194aad4bc1dc42c307c54a7/"
 allow_requestor_addresses = [
     "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
+    "0x2f08f5d80dEB0CECCb0f4eF3BaB46451a6C47E16",
 ]
 # NIZAMLESS PARAMETRELERI BITIS
 
 # If enabled, the order will be preflighted without constraints.
 priority_requestor_addresses = [
     "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
+    "0x2f08f5d80dEB0CECCb0f4eF3BaB46451a6C47E16",
 ]
 deny_requestor_addresses = [
     "0xc559d9bef7df0076f71a42ea58723f429652b789",
