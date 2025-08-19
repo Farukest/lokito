@@ -13,17 +13,20 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use crate::order_monitor::OrderMonitorErr;
 use alloy::{
-    network::Ethereum,
-    primitives::{Address, B256},
+    network::{Ethereum, eip2718::Encodable2718},
+    primitives::{Address, B256, TxKind, TxHash, U256},
     providers::Provider,
     sol,
     sol_types::SolCall,
+    consensus::{TxEip1559, TxEnvelope, SignableTransaction},
+    signers::{local::PrivateKeySigner, Signer},
+    rpc::types::TransactionRequest,
 };
-
-use alloy::rpc::types::Transaction;
-use alloy::consensus::Transaction as _;
+use alloy::consensus::Transaction;
+use alloy_primitives::Signature;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use boundless_market::{
@@ -39,8 +42,10 @@ use crate::{chain_monitor::ChainMonitorService, db::DbObj, errors::{impl_coded_d
 use thiserror::Error;
 use crate::config::ConfigLock;
 use crate::provers::ProverObj;
+use serde_json::json;
 
 const BLOCK_TIME_SAMPLE_SIZE: u64 = 10;
+
 #[derive(Error)]
 pub enum MarketMonitorErr {
     #[error("{code} Mempool polling failed: {0:?}", code = self.code())]
@@ -65,11 +70,11 @@ pub struct MarketMonitor<P> {
     market_addr: Address,
     provider: Arc<P>,
     config: ConfigLock,
-    // chain_monitor: Arc<ChainMonitorService<P>>,
     db_obj: DbObj,
     prover_addr: Address,
     boundless_service: BoundlessMarketService<Arc<P>>,
-    prover: ProverObj
+    prover: ProverObj,
+    signer: PrivateKeySigner,
 }
 
 impl<P> MarketMonitor<P>
@@ -80,21 +85,21 @@ where
         market_addr: Address,
         provider: Arc<P>,
         config: ConfigLock,
-        // chain_monitor: Arc<ChainMonitorService<P>>,
         db_obj: DbObj,
         prover_addr: Address,
-        prover: ProverObj
+        prover: ProverObj,
+        signer: PrivateKeySigner,
     ) -> Self {
         let boundless_service = BoundlessMarketService::new(market_addr, provider.clone(), prover_addr);
         Self {
             market_addr,
             provider,
             config,
-            // chain_monitor,
             db_obj,
             prover_addr,
             boundless_service,
-            prover
+            prover,
+            signer,
         }
     }
 
@@ -105,8 +110,9 @@ where
         config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
-        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
-        prover: ProverObj
+        boundless_service: &BoundlessMarketService<Arc<P>>,
+        prover: ProverObj,
+        signer: PrivateKeySigner,
     ) -> std::result::Result<(), MarketMonitorErr> {
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
 
@@ -137,6 +143,7 @@ where
                         &mut seen_tx_hashes,
                         boundless_service,
                         prover.clone(),
+                        signer.clone(),
                     ).await {
                         tracing::debug!("Error getting mempool content: {:?}", e);
                     }
@@ -153,8 +160,9 @@ where
         db_obj: DbObj,
         prover_addr: Address,
         seen_tx_hashes: &mut std::collections::HashSet<B256>,
-        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
-        prover : ProverObj
+        boundless_service: &BoundlessMarketService<Arc<P>>,
+        prover: ProverObj,
+        signer: PrivateKeySigner,
     ) -> Result<()> {
         // HTTP request - exactly like Node.js fetch
         let client = reqwest::Client::new();
@@ -186,6 +194,7 @@ where
                 seen_tx_hashes,
                 &boundless_service,
                 prover,
+                signer,
             ).await?;
         }
 
@@ -200,8 +209,9 @@ where
         db_obj: DbObj,
         prover_addr: Address,
         seen_tx_hashes: &mut std::collections::HashSet<B256>,
-        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
-        prover : ProverObj
+        boundless_service: &BoundlessMarketService<Arc<P>>,
+        prover: ProverObj,
+        signer: PrivateKeySigner,
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
             // First filter by FROM address (like Node.js FROM_FILTER)
@@ -244,6 +254,7 @@ where
                                                     prover_addr,
                                                     &boundless_service,
                                                     prover.clone(),
+                                                    signer.clone(),
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
@@ -262,14 +273,15 @@ where
     }
 
     async fn process_market_tx(
-        tx_data: &serde_json::Value,  // JSON'dan direkt al
+        tx_data: &serde_json::Value,
         provider: Arc<P>,
         market_addr: Address,
         config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
-        boundless_service: &BoundlessMarketService<Arc<P>>,  // Ekle
-        prover : ProverObj
+        boundless_service: &BoundlessMarketService<Arc<P>>,
+        prover: ProverObj,
+        signer: PrivateKeySigner,
     ) -> Result<()> {
 
         // Get transaction details
@@ -294,7 +306,7 @@ where
         let request_id = decoded.request.id;
 
 
-        // 1. DB’den commit edilmiş orderları çek
+        // 1. DB'den commit edilmiş orderları çek
         let committed_orders = db_obj.get_committed_orders().await
             .map_err(|e| MarketMonitorErr::UnexpectedErr(e.into()))?;
 
@@ -356,27 +368,30 @@ where
             locked_conf.market.lockin_priority_gas
         };
 
-
-
-        // 🎯 TIMESTAMP'LERİ SET ET
-        // new_order.target_timestamp = Some(decoded.request.lock_expires_at());
-        // new_order.expire_timestamp = Some(decoded.request.expires_at());
-        //
-        // tracing::info!("📊 Order timestamps calculated:");
-        // tracing::info!("   - Target (Lock expires): {}", new_order.target_timestamp.unwrap());
-        // tracing::info!("   - Expire (Order expires): {}", new_order.expire_timestamp.unwrap());
-
         tracing::info!("🚀 Attempting to lock request: 0x{:x}", request_id);
+
         // CONFIG DELAY
         if let Some(delay) = lock_delay_ms {
             tracing::info!(" -- DELAY {} ms başlatılıyor - ORDER ID : 0x{:x}", delay, request_id);
             tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
         }
 
+        // HTTP RPC URL'i al
+        let http_rpc_url = {
+            let conf = config.lock_all().context("Failed to read config")?;
+            conf.market.my_rpc_url.clone()
+        };
 
-        // new_order.image_id = Some(Self::normalize_hex_data(&decoded.requirements.imageId));
-
-        match boundless_service.lock_request(&decoded.request, decoded.clientSignature.clone(), lockin_priority_gas).await {
+        // DEĞİŞİKLİK: boundless_service.lock_request yerine send_private_transaction kullan
+        match Self::send_private_transaction(
+            &decoded.request,
+            &decoded.clientSignature,
+            &signer,
+            market_addr,
+            http_rpc_url,
+            lockin_priority_gas.unwrap_or(5000000),
+            provider.clone(),
+        ).await {
             Ok(lock_block) => {
                 tracing::info!("✅ Successfully locked request: 0x{:x} at block {}", request_id, lock_block);
 
@@ -441,6 +456,154 @@ where
         Ok(())
     }
 
+    // Offchain'deki send_private_transaction fonksiyonunu ekle
+    async fn send_private_transaction(
+        request: &boundless_market::contracts::ProofRequest,
+        client_signature: &alloy::primitives::Bytes,
+        signer: &PrivateKeySigner,
+        contract_address: Address,
+        http_rpc_url: String,
+        lockin_priority_gas: u64,
+        provider: Arc<P>,
+    ) -> Result<u64, anyhow::Error> {
+        tracing::info!("🚀 SENDING PRIVATE TRANSACTION...");
+
+        // Nonce ve chain_id al
+        let chain_id = provider.get_chain_id().await.context("Failed to get chain id")?;
+        let current_nonce = provider
+            .get_transaction_count(signer.address())
+            .pending()
+            .await
+            .context("Failed to get transaction count")?;
+
+        tracing::info!("📦 Using nonce: {}, chain_id: {}", current_nonce, chain_id);
+
+        let lock_call = IBoundlessMarket::lockRequestCall {
+            request: request.clone(),
+            clientSignature: client_signature.clone(),
+        };
+
+        let lock_calldata = lock_call.abi_encode();
+        tracing::info!("🔍 ENCODED CALLDATA: 0x{}", hex::encode(&lock_calldata));
+
+        let max_priority_fee_per_gas = lockin_priority_gas.into();
+        let min_competitive_gas = 60_000_000u128;
+        let base_fee = min_competitive_gas;
+        let max_fee_per_gas = base_fee + max_priority_fee_per_gas;
+
+        let tx = TxEip1559 {
+            chain_id,
+            nonce: current_nonce,
+            gas_limit: 500_000u64,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to: TxKind::Call(contract_address),
+            value: U256::ZERO,
+            input: lock_calldata.into(),
+            access_list: Default::default(),
+        };
+
+        let signature_hash = tx.signature_hash();
+        let signature = signer.sign_hash(&signature_hash).await?;
+        let tx_signed = tx.into_signed(signature);
+        let tx_envelope: TxEnvelope = tx_signed.into();
+        let tx_encoded = tx_envelope.encoded_2718();
+
+        let expected_tx_hash = tx_envelope.tx_hash();
+        tracing::info!("🎯 Expected transaction hash: 0x{}", hex::encode(expected_tx_hash.as_slice()));
+
+        let rclient = reqwest::Client::new();
+        let response = rclient
+            .post(http_rpc_url)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "method": "eth_sendPrivateTransaction",
+                "params": [{
+                    "tx": format!("0x{}", hex::encode(&tx_encoded)),
+                    "maxBlockNumber": "0x0",
+                    "source": "customer_farukest"
+                }],
+                "id": 1
+            }))
+            .send()
+            .await
+            .context("Failed to send private transaction request")?;
+
+        let result: serde_json::Value = response.json().await
+            .context("Failed to parse response JSON")?;
+
+        if let Some(error) = result.get("error") {
+            return Err(anyhow::anyhow!("Private transaction failed: {}", error));
+        }
+
+        let tx_hash = result["result"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No transaction hash in response"))?
+            .to_string();
+
+        let tx_hash_parsed = tx_hash.parse()
+            .context("Failed to parse transaction hash")?;
+        tracing::info!("🎯 Private transaction hash: {}", tx_hash);
+
+        let tx_receipt = Self::wait_for_transaction_receipt(provider.clone(), tx_hash_parsed)
+            .await
+            .context("Failed to get transaction receipt")?;
+
+        if !tx_receipt.status() {
+            tracing::warn!("⚠️ İşlem {} REVERT oldu. Lock alınamadı.", tx_hash);
+            return Err(anyhow::anyhow!("Transaction reverted on chain"));
+        }
+
+        let lock_block = tx_receipt.block_number
+            .ok_or_else(|| anyhow::anyhow!("No block number in receipt"))?;
+
+        tracing::info!("✅ İşlem {} başarıyla onaylandı. Lock alındı. Block: {}", tx_hash, lock_block);
+
+        Ok(lock_block)
+    }
+
+    // wait_for_transaction_receipt fonksiyonunu da ekle
+    async fn wait_for_transaction_receipt(
+        provider: Arc<P>,
+        tx_hash: TxHash,
+    ) -> Result<alloy::rpc::types::TransactionReceipt, anyhow::Error> {
+        tracing::info!("⏳ İşlem onayını bekliyor: 0x{}", hex::encode(tx_hash.as_slice()));
+
+        const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
+        const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+        let start_time = Instant::now();
+
+        loop {
+            if start_time.elapsed() > RECEIPT_TIMEOUT {
+                return Err(anyhow::anyhow!(
+                    "Transaction 0x{} timeout after {} seconds",
+                    hex::encode(tx_hash.as_slice()),
+                    RECEIPT_TIMEOUT.as_secs()
+                ));
+            }
+
+            match provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(receipt)) => {
+                    let elapsed = start_time.elapsed();
+                    tracing::info!("✅ İşlem 0x{} başarıyla onaylandı ({:.1}s sonra)",
+                                 hex::encode(tx_hash.as_slice()), elapsed.as_secs_f64());
+                    return Ok(receipt);
+                }
+                Ok(None) => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!("Error getting transaction receipt: {:?}, retrying...", e);
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+        }
+    }
+
     // Helper function (aynı kalır)
     // Input hex ile çalışan alternatif fonksiyon
     async fn fetch_confirmed_transaction_data_by_input(
@@ -489,11 +652,12 @@ where
         let market_addr = self.market_addr;
         let provider = self.provider.clone();
         let prover_addr = self.prover_addr;
-        // let chain_monitor = self.chain_monitor.clone();
         let db = self.db_obj.clone();
         let config = self.config.clone();
         let prover = self.prover.clone();
         let boundless_service = self.boundless_service.clone();
+        let signer = self.signer.clone();
+
         Box::pin(async move {
             tracing::info!("Starting market monitor");
 
@@ -504,8 +668,9 @@ where
                 config,
                 db,
                 prover_addr,
-                &boundless_service,  // Reference ver
+                &boundless_service,
                 prover,
+                signer,
             )
                 .await
                 .map_err(SupervisorErr::Recover)?;

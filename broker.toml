@@ -3,26 +3,29 @@ mcycle_price = "0.000000000007"
 mcycle_price_stake_token = "0.0001"
 peak_prove_khz = 800
 max_mcycle_limit = 14400
-max_journal_bytes = 10000
+max_journal_bytes = 1000000
 min_deadline = 250
 lookback_blocks = 300
-max_stake = "5"
-max_file_size = 50_000_000
+max_stake = "42"
+max_file_size = 9_000_000_000
 max_concurrent_proofs = 1
 max_concurrent_preflights = 2  # Double the concurrency to handle more orders
 max_critical_task_retries = 10
-lockin_priority_gas = 50000000
+lockin_priority_gas = 1000000000
 balance_warn_threshold = "0.015"
 balance_error_threshold = "0.01"
 stake_balance_warn_threshold = "4"
 stake_balance_error_threshold = "3"
 
+# VAST 8X OFLITO
 # NIZAMLESS PARAMETRELERI
 reaper_grace_period_secs = 18000
 reaper_interval_secs = 300
-min_lock_out_time = 23
+min_lock_out_time = 150
 lock_delay_ms = 0
-my_rpc_url = "https://base-mainnet.g.alchemy.com/v2/6opiBZPWbB1vwpOSYONPP"
+prove_adress = "0x29f2b7e610abddb467885044c14a665263fd6aaaa78b0358489a33cd82a46584"
+block_number = 34291052
+my_rpc_url = "https://few-intensive-layer.base-mainnet.quiknode.pro/219e37029c041b5aa194aad4bc1dc42c307c54a7/"
 allow_requestor_addresses = [
     "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
 ]
