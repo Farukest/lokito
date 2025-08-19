@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 use std::time::{Duration, Instant};
+use std::collections::HashSet;
+use tokio::time::sleep;
 use crate::order_monitor::OrderMonitorErr;
 use alloy::{
     network::{Ethereum, eip2718::Encodable2718},
@@ -50,6 +52,7 @@ const BLOCK_TIME_SAMPLE_SIZE: u64 = 10;
 // Global cache'ler - offchain monitor'daki gibi
 static CACHED_CHAIN_ID: AtomicU64 = AtomicU64::new(0);
 static CURRENT_NONCE: AtomicU64 = AtomicU64::new(0);
+static IS_PROCESSING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Error)]
 pub enum MarketMonitorErr {
@@ -71,6 +74,14 @@ impl CodedError for MarketMonitorErr {
 
 impl_coded_debug!(MarketMonitorErr);
 
+// Config verileri için cache struct
+#[derive(Clone)]
+struct CachedConfig {
+    allowed_requestor_addresses: Option<HashSet<Address>>,
+    http_rpc_url: String,
+    lockin_priority_gas: Option<u64>,
+}
+
 pub struct MarketMonitor<P> {
     market_addr: Address,
     provider: Arc<P>,
@@ -80,6 +91,7 @@ pub struct MarketMonitor<P> {
     boundless_service: BoundlessMarketService<Arc<P>>,
     prover: ProverObj,
     signer: PrivateKeySigner,
+    cached_config: CachedConfig,  // ✅ Config cache eklendi
 }
 
 impl<P> MarketMonitor<P>
@@ -96,6 +108,17 @@ where
         signer: PrivateKeySigner,
     ) -> Self {
         let boundless_service = BoundlessMarketService::new(market_addr, provider.clone(), prover_addr);
+
+        // ✅ Config'i başlangıçta cache'le
+        let cached_config = {
+            let conf = config.lock_all().context("Failed to read config during initialization").unwrap();
+            CachedConfig {
+                allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
+                http_rpc_url: conf.market.my_rpc_url.clone(),
+                lockin_priority_gas: conf.market.lockin_priority_gas,
+            }
+        };
+
         Self {
             market_addr,
             provider,
@@ -105,29 +128,79 @@ where
             boundless_service,
             prover,
             signer,
+            cached_config
         }
+    }
+
+
+    // ✅ Processing durumunu kontrol et
+    fn is_currently_processing() -> bool {
+        IS_PROCESSING.load(Ordering::Relaxed)
+    }
+
+    // ✅ Processing'i true yap
+    fn set_processing_true() {
+        IS_PROCESSING.store(true, Ordering::Relaxed);
+        tracing::info!("🔒 Processing flag set to TRUE - blocking new orders");
+    }
+
+    // ✅ Processing'i false yap
+    fn set_processing_false() {
+        IS_PROCESSING.store(false, Ordering::Relaxed);
+        tracing::info!("🔓 Processing flag set to FALSE - allowing new orders");
+    }
+
+    // ✅ Async dinleme servisi - committed orders'ları kontrol eder
+    async fn start_committed_orders_monitor(db_obj: DbObj) -> Result<()> {
+        tracing::info!("👁️👁️ Starting committed orders monitor service...");
+
+        let check_interval = Duration::from_millis(180000); // 180 saniyede bir kontrol
+
+        loop {
+            // Committed orders'ları kontrol et
+            match db_obj.get_committed_orders().await {
+                Ok(committed_orders) => {
+                    let count = committed_orders.len();
+                    tracing::debug!("📊 Committed orders count: {}", count);
+
+                    // Eğer committed orders 0 ise, processing'i false yap ve servisi bitir
+                    if count == 0 {
+                        Self::set_processing_false();
+                        tracing::info!("✅ No committed orders found - monitor service stopping and proof checking continue..");
+                        break; // Servis kendini iptal ediyor
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Error checking committed orders: {:?}", e);
+                    // DB hatası olursa 5 saniye bekle ve tekrar dene
+                    tokio::time::sleep(Duration::from_millis(10000)).await;
+                    continue;
+                }
+            }
+
+            // Belirtilen interval kadar bekle
+            tokio::time::sleep(check_interval).await;
+        }
+
+        tracing::info!("🔚 Committed orders monitor service ended");
+        Ok(())
     }
 
     async fn start_mempool_polling(
         market_addr: Address,
         provider: Arc<P>,
         cancel_token: CancellationToken,
-        config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
         boundless_service: &BoundlessMarketService<Arc<P>>,
         prover: ProverObj,
         signer: PrivateKeySigner,
+        cached_config: CachedConfig,  // ✅ Cache'i parametre olarak al
     ) -> std::result::Result<(), MarketMonitorErr> {
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
 
-        // Config'den HTTP RPC URL'i al
-        let http_rpc_url = {
-            let conf = config.lock_all().context("Failed to read config")?;
-            conf.market.my_rpc_url.clone()
-        };
-
-        tracing::info!("Using RPC URL: {}", http_rpc_url);
+        // ✅ Cache'den HTTP RPC URL'i al
+        tracing::info!("Using RPC URL: {}", cached_config.http_rpc_url);
 
         // Chain ID ve initial nonce'u cache'le - offchain monitor'daki gibi
         let chain_id = 8453u64;
@@ -153,16 +226,16 @@ where
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
                     if let Err(e) = Self::get_mempool_content(
-                        &http_rpc_url,
+                        &cached_config.http_rpc_url,  // ✅ Cache'den kullan
                         market_addr,
                         provider.clone(),
-                        config.clone(),
                         db_obj.clone(),
                         prover_addr,
                         &mut seen_tx_hashes,
                         boundless_service,
                         prover.clone(),
                         signer.clone(),
+                        cached_config.clone(),  // ✅ Cache'i geç
                     ).await {
                         tracing::debug!("Error getting mempool content: {:?}", e);
                     }
@@ -175,13 +248,13 @@ where
         http_rpc_url: &str,
         market_addr: Address,
         provider: Arc<P>,
-        config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
         seen_tx_hashes: &mut std::collections::HashSet<B256>,
         boundless_service: &BoundlessMarketService<Arc<P>>,
         prover: ProverObj,
         signer: PrivateKeySigner,
+        cached_config: CachedConfig,  // ✅ Cache'i parametre olarak al
     ) -> Result<()> {
         // HTTP request - exactly like Node.js fetch
         let client = reqwest::Client::new();
@@ -207,13 +280,13 @@ where
                 result,
                 market_addr,
                 provider,
-                config,
                 db_obj,
                 prover_addr,
                 seen_tx_hashes,
                 &boundless_service,
                 prover,
                 signer,
+                cached_config,  // ✅ Cache'i geç
             ).await?;
         }
 
@@ -224,27 +297,24 @@ where
         result: &serde_json::Value,
         market_addr: Address,
         provider: Arc<P>,
-        config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
         seen_tx_hashes: &mut std::collections::HashSet<B256>,
         boundless_service: &BoundlessMarketService<Arc<P>>,
         prover: ProverObj,
         signer: PrivateKeySigner,
+        cached_config: CachedConfig,  // ✅ Cache'i parametre olarak al
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
-            // First filter by FROM address (like Node.js FROM_FILTER)
-            let allowed_requestors_opt = {
-                let locked_conf = config.lock_all().context("Failed to read config")?;
-                locked_conf.market.allow_requestor_addresses.clone()
-            };
+            // ✅ Cache'den allowed requestors'u al
+            let allowed_requestors_opt = &cached_config.allowed_requestor_addresses;
 
             for tx_data in transactions {
                 // Check FROM address first (like Node.js FROM_FILTER)
                 if let Some(from_addr) = tx_data.get("from").and_then(|f| f.as_str()) {
                     if let Ok(parsed_from) = from_addr.parse::<Address>() {
                         // Apply FROM filter if configured
-                        if let Some(allow_addresses) = &allowed_requestors_opt {
+                        if let Some(allow_addresses) = allowed_requestors_opt {
                             if !allow_addresses.contains(&parsed_from) {
                                 continue; // Skip if not in allowed FROM addresses
                             }
@@ -261,19 +331,18 @@ where
 
                                                 tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX!");
                                                 tracing::info!("   Hash: 0x{:x}", parsed_hash);
-                                                // tracing::info!("   From: 0x{:x} → To: 0x{:x}", parsed_from, parsed_to);
 
                                                 // Process the transaction
                                                 if let Err(e) = Self::process_market_tx(
                                                     tx_data,  // JSON tx data'sını direkt geç
                                                     provider.clone(),
                                                     market_addr,
-                                                    config.clone(),
                                                     db_obj.clone(),
                                                     prover_addr,
                                                     &boundless_service,
                                                     prover.clone(),
                                                     signer.clone(),
+                                                    cached_config.clone(),  // ✅ Cache'i geç
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
@@ -295,20 +364,25 @@ where
         tx_data: &serde_json::Value,
         provider: Arc<P>,
         market_addr: Address,
-        config: ConfigLock,
         db_obj: DbObj,
         prover_addr: Address,
         boundless_service: &BoundlessMarketService<Arc<P>>,
         prover: ProverObj,
         signer: PrivateKeySigner,
+        cached_config: CachedConfig,  // ✅ Cache'i parametre olarak al
     ) -> Result<()> {
+
+        // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
+        if Self::is_currently_processing() {
+            tracing::info!("⏳ Already processing an order, skipping new request");
+            return Ok(());
+        }
 
         // Get transaction details
         // tx_data'dan input'u direkt al
         let input_hex = tx_data.get("input")
             .and_then(|i| i.as_str())
             .ok_or_else(|| anyhow::anyhow!("No input in tx data"))?;
-
 
         let input_bytes = hex::decode(&input_hex[2..])?; // 0x prefix'i kaldır
 
@@ -324,51 +398,15 @@ where
         let client_addr = decoded.request.client_address();
         let request_id = decoded.request.id;
 
-
-        // 1. DB'den commit edilmiş orderları çek
-        let committed_orders = db_obj.get_committed_orders().await
-            .map_err(|e| MarketMonitorErr::UnexpectedErr(e.into()))?;
-
-
-        let committed_count = committed_orders.len();
-
-        let max_capacity = Some(1); // Konfigürasyondan da alınabilir
-        if let Some(max_capacity) = max_capacity {
-            if committed_count as u32 >= max_capacity {
-                tracing::info!("committed_count as u32 >= max_capacity");
-                tracing::info!("Committed orders count ({}) reached max concurrency limit ({}), skipping lock for order {:?}",
-                    committed_count,
-                    max_capacity,
-                    request_id
-                );
-                tracing::info!("return Ok(())");
-                return Ok(()); // Yeni order locklama yapılmaz
-            }
-        }
-
-
-        // tracing::info!("📋 Processing submitRequest:");
         tracing::info!("   - Request ID: 0x{:x}", request_id);
-        // tracing::info!("   - Client: 0x{:x}", client_addr);
 
-        // Check if client is allowed (if filter is configured)
-        let (allowed_requestors_opt, lock_delay_ms) = {
-            let locked_conf = config.lock_all().context("Failed to read config")?;
-            (
-                locked_conf.market.allow_requestor_addresses.clone(),
-                locked_conf.market.lock_delay_ms
-            )
-        };
-
-
-        if let Some(allow_addresses) = allowed_requestors_opt {
+        // ✅ Cache'den allowed requestors kontrolü - sadece bir if ile!
+        if let Some(allow_addresses) = &cached_config.allowed_requestor_addresses {
             if !allow_addresses.contains(&client_addr) {
                 tracing::debug!("🚫 Client not in allowed requestors, skipping");
                 return Ok(());
             }
         }
-
-        // tracing::info!("✅ Processing allowed request from: 0x{:x}", client_addr);
 
         // Get chain ID from cache and create order - offchain monitor'daki gibi
         let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
@@ -381,25 +419,8 @@ where
             chain_id,
         );
 
-        // Try to lock the request
-        let lockin_priority_gas = {
-            let locked_conf = config.lock_all().context("Failed to read config")?;
-            locked_conf.market.lockin_priority_gas
-        };
-
-        // tracing::info!("🚀 Attempting to lock request: 0x{:x}", request_id);
-
-        // CONFIG DELAY
-        // if let Some(delay) = lock_delay_ms {
-            // tracing::info!(" -- DELAY {} ms başlatılıyor - ORDER ID : 0x{:x}", delay, request_id);
-            // tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-        // }
-
-        // HTTP RPC URL'i al
-        let http_rpc_url = {
-            let conf = config.lock_all().context("Failed to read config")?;
-            conf.market.my_rpc_url.clone()
-        };
+        // ✅ Cache'den lockin_priority_gas al
+        let lockin_priority_gas = cached_config.lockin_priority_gas;
 
         // send_private_transaction'ı offchain monitor'daki gibi optimize et
         match Self::send_private_transaction(
@@ -407,7 +428,7 @@ where
             &decoded.clientSignature,
             &signer,
             market_addr,
-            http_rpc_url,
+            cached_config.http_rpc_url.clone(),  // ✅ Cache'den kullan
             lockin_priority_gas.unwrap_or(5000000),
             provider.clone(),
         ).await {
@@ -433,9 +454,7 @@ where
                     .price_at(lock_timestamp)
                     .context("------------------------ lock_price : Failed to calculate lock price.....")?;
 
-
                 let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), input_hex).await {
-
                     Ok(confirmed_request) => {
                         tracing::info!("✅ Got CONFIRMED data, creating updated order: 0x{:x}", request_id);
 
@@ -458,9 +477,22 @@ where
                     }
                 };
 
-
                 if let Err(e) = db_obj.insert_accepted_request(&final_order, lock_price).await {
                     tracing::error!("Failed to insert accepted request: {:?}", e);
+                }else{
+                    // ✅ DB'ye başarılı yazıldıktan SONRA processing = true
+                    Self::set_processing_true();
+                    tracing::info!("💾 Order successfully saved to DB, processing flag set to TRUE");
+
+                    // ✅ Async dinleme servisini başlat
+                    let db_clone = db_obj.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::start_committed_orders_monitor(db_clone).await {
+                            tracing::error!("❌ Committed orders monitor error: {:?}", e);
+                            // Hata durumunda processing'i true yap cünkü lock işlemine başlamak için bir sebep olamaz. durması daha evla.
+                            Self::set_processing_true();
+                        }
+                    });
                 }
             }
             Err(err) => {
@@ -485,14 +517,10 @@ where
         lockin_priority_gas: u64,
         provider: Arc<P>,
     ) -> Result<u64, anyhow::Error> {
-        // tracing::info!("🚀 SENDING PRIVATE TRANSACTION...");
-
         // Cache'den chain_id ve nonce al - provider'a sormuyoruz!
         let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
         let current_nonce = CURRENT_NONCE.load(Ordering::Relaxed);
         CURRENT_NONCE.store(current_nonce + 1, Ordering::Relaxed);
-
-        // tracing::info!("📦 Using nonce: {} (next will be: {})", current_nonce, current_nonce + 1);
 
         let lock_call = IBoundlessMarket::lockRequestCall {
             request: request.clone(),
@@ -500,7 +528,6 @@ where
         };
 
         let lock_calldata = lock_call.abi_encode();
-        // tracing::info!("🔍 ENCODED CALLDATA: 0x{}", hex::encode(&lock_calldata));
 
         let max_priority_fee_per_gas = lockin_priority_gas.into();
         let min_competitive_gas = 60_000_000u128;
@@ -526,7 +553,6 @@ where
         let tx_encoded = tx_envelope.encoded_2718();
 
         let expected_tx_hash = tx_envelope.tx_hash();
-        // tracing::info!("🎯 Expected transaction hash: 0x{}", hex::encode(expected_tx_hash.as_slice()));
 
         let rclient = reqwest::Client::new();
         let response = rclient
@@ -643,7 +669,6 @@ where
         }
     }
 
-    // Helper function (aynı kalır)
     // Input hex ile çalışan alternatif fonksiyon
     async fn fetch_confirmed_transaction_data_by_input(
         provider: Arc<P>,
@@ -661,11 +686,9 @@ where
         Ok(decoded_call.request)
     }
 
-
     fn format_time(dt: DateTime<Utc>) -> String {
         dt.format("%H:%M:%S%.3f").to_string()
     }
-
 
     // Her zaman 0x ile başlayan format kullan
     fn normalize_hex_data(data: &str) -> String {
@@ -675,11 +698,7 @@ where
             format!("0x{}", data)
         }
     }
-
 }
-
-
-
 
 impl<P> RetryTask for MarketMonitor<P>
 where
@@ -692,10 +711,10 @@ where
         let provider = self.provider.clone();
         let prover_addr = self.prover_addr;
         let db = self.db_obj.clone();
-        let config = self.config.clone();
         let prover = self.prover.clone();
         let boundless_service = self.boundless_service.clone();
         let signer = self.signer.clone();
+        let cached_config = self.cached_config.clone();  // ✅ Cache'i clone'la
 
         Box::pin(async move {
             tracing::info!("Starting market monitor");
@@ -704,12 +723,12 @@ where
                 market_addr,
                 provider,
                 cancel_token,
-                config,
                 db,
                 prover_addr,
                 &boundless_service,
                 prover,
                 signer,
+                cached_config,  // ✅ Cache'i geç
             )
                 .await
                 .map_err(SupervisorErr::Recover)?;
