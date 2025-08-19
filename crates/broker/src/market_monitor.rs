@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use crate::order_monitor::OrderMonitorErr;
 use alloy::{
@@ -45,6 +46,10 @@ use crate::provers::ProverObj;
 use serde_json::json;
 
 const BLOCK_TIME_SAMPLE_SIZE: u64 = 10;
+
+// Global cache'ler - offchain monitor'daki gibi
+static CACHED_CHAIN_ID: AtomicU64 = AtomicU64::new(0);
+static CURRENT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Error)]
 pub enum MarketMonitorErr {
@@ -123,6 +128,20 @@ where
         };
 
         tracing::info!("Using RPC URL: {}", http_rpc_url);
+
+        // Chain ID ve initial nonce'u cache'le - offchain monitor'daki gibi
+        let chain_id = 8453u64;
+        CACHED_CHAIN_ID.store(chain_id, Ordering::Relaxed);
+
+        let initial_nonce = provider
+            .get_transaction_count(signer.address())
+            .pending()
+            .await
+            .context("Failed to get transaction count")?;
+
+        CURRENT_NONCE.store(initial_nonce, Ordering::Relaxed);
+
+        tracing::info!("✅ Cache initialized - ChainId: {}, Initial Nonce: {}", chain_id, initial_nonce);
 
         let mut seen_tx_hashes = std::collections::HashSet::<B256>::new();
 
@@ -351,8 +370,8 @@ where
 
         tracing::info!("✅ Processing allowed request from: 0x{:x}", client_addr);
 
-        // Get chain ID and create order
-        let chain_id = provider.get_chain_id().await.context("Failed to get chain id")?;
+        // Get chain ID from cache and create order - offchain monitor'daki gibi
+        let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
 
         let mut new_order = OrderRequest::new(
             decoded.request.clone(),
@@ -382,7 +401,7 @@ where
             conf.market.my_rpc_url.clone()
         };
 
-        // DEĞİŞİKLİK: boundless_service.lock_request yerine send_private_transaction kullan
+        // send_private_transaction'ı offchain monitor'daki gibi optimize et
         match Self::send_private_transaction(
             &decoded.request,
             &decoded.clientSignature,
@@ -456,7 +475,7 @@ where
         Ok(())
     }
 
-    // Offchain'deki send_private_transaction fonksiyonunu ekle
+    // Optimize edilmiş send_private_transaction - offchain monitor'daki gibi
     async fn send_private_transaction(
         request: &boundless_market::contracts::ProofRequest,
         client_signature: &alloy::primitives::Bytes,
@@ -468,15 +487,12 @@ where
     ) -> Result<u64, anyhow::Error> {
         tracing::info!("🚀 SENDING PRIVATE TRANSACTION...");
 
-        // Nonce ve chain_id al
-        let chain_id = provider.get_chain_id().await.context("Failed to get chain id")?;
-        let current_nonce = provider
-            .get_transaction_count(signer.address())
-            .pending()
-            .await
-            .context("Failed to get transaction count")?;
+        // Cache'den chain_id ve nonce al - provider'a sormuyoruz!
+        let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
+        let current_nonce = CURRENT_NONCE.load(Ordering::Relaxed);
+        CURRENT_NONCE.store(current_nonce + 1, Ordering::Relaxed);
 
-        tracing::info!("📦 Using nonce: {}, chain_id: {}", current_nonce, chain_id);
+        tracing::info!("📦 Using nonce: {} (next will be: {})", current_nonce, current_nonce + 1);
 
         let lock_call = IBoundlessMarket::lockRequestCall {
             request: request.clone(),
@@ -534,6 +550,29 @@ where
             .context("Failed to parse response JSON")?;
 
         if let Some(error) = result.get("error") {
+            let error_message = error.to_string().to_lowercase();
+
+            if error_message.contains("nonce") {
+                tracing::error!("❌ Nonce hatası: {}", error);
+
+                // Nonce hatası varsa fresh nonce al ve cache'i güncelle
+                let fresh_nonce = provider
+                    .get_transaction_count(signer.address())
+                    .pending()
+                    .await
+                    .context("Failed to get fresh transaction count")?;
+
+                CURRENT_NONCE.store(fresh_nonce, Ordering::Relaxed);
+                tracing::info!("🔄 Nonce resynchronized from {} to {}", current_nonce, fresh_nonce);
+
+                return Err(anyhow::anyhow!("Nonce error - resynchronized: {}", error));
+            }
+
+            // Diğer hatalar için nonce'u geri al
+            let prev_nonce = current_nonce;
+            CURRENT_NONCE.store(prev_nonce, Ordering::Relaxed);
+            tracing::warn!("⚠️ Transaction failed, rolled back nonce to: {}", prev_nonce);
+
             return Err(anyhow::anyhow!("Private transaction failed: {}", error));
         }
 
