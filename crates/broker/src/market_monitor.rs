@@ -261,7 +261,7 @@ where
 
                                                 tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX!");
                                                 tracing::info!("   Hash: 0x{:x}", parsed_hash);
-                                                tracing::info!("   From: 0x{:x} → To: 0x{:x}", parsed_from, parsed_to);
+                                                // tracing::info!("   From: 0x{:x} → To: 0x{:x}", parsed_from, parsed_to);
 
                                                 // Process the transaction
                                                 if let Err(e) = Self::process_market_tx(
@@ -347,9 +347,9 @@ where
         }
 
 
-        tracing::info!("📋 Processing submitRequest:");
+        // tracing::info!("📋 Processing submitRequest:");
         tracing::info!("   - Request ID: 0x{:x}", request_id);
-        tracing::info!("   - Client: 0x{:x}", client_addr);
+        // tracing::info!("   - Client: 0x{:x}", client_addr);
 
         // Check if client is allowed (if filter is configured)
         let (allowed_requestors_opt, lock_delay_ms) = {
@@ -368,7 +368,7 @@ where
             }
         }
 
-        tracing::info!("✅ Processing allowed request from: 0x{:x}", client_addr);
+        // tracing::info!("✅ Processing allowed request from: 0x{:x}", client_addr);
 
         // Get chain ID from cache and create order - offchain monitor'daki gibi
         let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
@@ -387,13 +387,13 @@ where
             locked_conf.market.lockin_priority_gas
         };
 
-        tracing::info!("🚀 Attempting to lock request: 0x{:x}", request_id);
+        // tracing::info!("🚀 Attempting to lock request: 0x{:x}", request_id);
 
         // CONFIG DELAY
-        if let Some(delay) = lock_delay_ms {
-            tracing::info!(" -- DELAY {} ms başlatılıyor - ORDER ID : 0x{:x}", delay, request_id);
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-        }
+        // if let Some(delay) = lock_delay_ms {
+            // tracing::info!(" -- DELAY {} ms başlatılıyor - ORDER ID : 0x{:x}", delay, request_id);
+            // tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+        // }
 
         // HTTP RPC URL'i al
         let http_rpc_url = {
@@ -485,14 +485,14 @@ where
         lockin_priority_gas: u64,
         provider: Arc<P>,
     ) -> Result<u64, anyhow::Error> {
-        tracing::info!("🚀 SENDING PRIVATE TRANSACTION...");
+        // tracing::info!("🚀 SENDING PRIVATE TRANSACTION...");
 
         // Cache'den chain_id ve nonce al - provider'a sormuyoruz!
         let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
         let current_nonce = CURRENT_NONCE.load(Ordering::Relaxed);
         CURRENT_NONCE.store(current_nonce + 1, Ordering::Relaxed);
 
-        tracing::info!("📦 Using nonce: {} (next will be: {})", current_nonce, current_nonce + 1);
+        // tracing::info!("📦 Using nonce: {} (next will be: {})", current_nonce, current_nonce + 1);
 
         let lock_call = IBoundlessMarket::lockRequestCall {
             request: request.clone(),
@@ -500,7 +500,7 @@ where
         };
 
         let lock_calldata = lock_call.abi_encode();
-        tracing::info!("🔍 ENCODED CALLDATA: 0x{}", hex::encode(&lock_calldata));
+        // tracing::info!("🔍 ENCODED CALLDATA: 0x{}", hex::encode(&lock_calldata));
 
         let max_priority_fee_per_gas = lockin_priority_gas.into();
         let min_competitive_gas = 60_000_000u128;
@@ -526,7 +526,7 @@ where
         let tx_encoded = tx_envelope.encoded_2718();
 
         let expected_tx_hash = tx_envelope.tx_hash();
-        tracing::info!("🎯 Expected transaction hash: 0x{}", hex::encode(expected_tx_hash.as_slice()));
+        // tracing::info!("🎯 Expected transaction hash: 0x{}", hex::encode(expected_tx_hash.as_slice()));
 
         let rclient = reqwest::Client::new();
         let response = rclient
