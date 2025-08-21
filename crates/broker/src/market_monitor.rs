@@ -228,7 +228,7 @@ where
     }
 
     // ✅ Async dinleme servisi - committed orders'ları kontrol eder
-    async fn start_committed_orders_monitor(db_obj: DbObj, cached_config: CachedConfig) -> Result<()> {
+    async fn start_committed_orders_monitor(db_obj: DbObj, cached_config: CachedConfig, config: ConfigLock) -> Result<()> {
         tracing::info!("👁️👁️ Starting committed orders monitor service...");
 
         // ✅ Basit unwrap_or ile default 360 saniye
@@ -244,6 +244,18 @@ where
 
                     // Eğer committed orders 0 ise, processing'i false yap ve servisi bitir
                     if count == 0 {
+                        // ✅ Config'i tekrar oluştur
+                        let cached_config = {
+                            let conf = config.lock_all().context("Failed to read config during initialization").unwrap();
+                            CachedConfig {
+                                allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
+                                http_rpc_url: conf.market.my_rpc_url.clone(),
+                                lockin_priority_gas: conf.market.lockin_priority_gas,
+                                wait_time_for_new_order: conf.market.wait_time_for_new_order,
+                            }
+                        };
+                        tracing::info!("📖📖📖 CONFIG GUNCELLENIYOR 📖📖📖");
+                        Duration::from_millis(5000);
                         Self::set_processing_false();
                         tracing::info!("✅ No committed orders found - monitor service stopping and proof checking continue..");
                         break; // Servis kendini iptal ediyor
@@ -276,6 +288,7 @@ where
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
         http_client: OptimizedHttpClient,  // ✅ Optimize edilmiş client
+        config: ConfigLock
     ) -> std::result::Result<(), MarketMonitorErr> {
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
         tracing::info!("🚀 Using optimized HTTP client with connection pooling");
@@ -303,6 +316,15 @@ where
                     return Ok(());
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
+
+
+                    // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
+                    if Self::is_currently_processing() {
+                        tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
+                        return Ok(());
+                    }
+
+
                     if let Err(e) = Self::get_mempool_content(
                         &http_client,  // ✅ Optimize edilmiş client kullan
                         market_addr,
@@ -314,6 +336,7 @@ where
                         prover.clone(),
                         signer.clone(),
                         cached_config.clone(),
+                        config.clone()
                     ).await {
                         tracing::debug!("Error getting mempool content: {:?}", e);
                     }
@@ -333,6 +356,7 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
+        config: ConfigLock
     ) -> Result<()> {
         // ✅ Optimize edilmiş HTTP client kullan
         let data = http_client.get_pending_block().await?;
@@ -349,6 +373,7 @@ where
                 prover,
                 signer,
                 cached_config,
+                config
             ).await?;
         }
 
@@ -366,6 +391,7 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
+        config: ConfigLock
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
             // ✅ Cache'den allowed requestors'u al
@@ -405,6 +431,7 @@ where
                                                     prover.clone(),
                                                     signer.clone(),
                                                     cached_config.clone(),
+                                                    config.clone()
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
@@ -432,13 +459,8 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
+        config: ConfigLock
     ) -> Result<()> {
-
-        // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
-        if Self::is_currently_processing() {
-            tracing::info!("⏳ Already processing an order, skipping new request");
-            return Ok(());
-        }
 
         // Get transaction details
         // tx_data'dan input'u direkt al
@@ -552,7 +574,7 @@ where
                     // ✅ Async dinleme servisini başlat
                     let db_clone = db_obj.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::start_committed_orders_monitor(db_clone, cached_config.clone()).await {
+                        if let Err(e) = Self::start_committed_orders_monitor(db_clone, cached_config.clone(), config).await {
                             tracing::error!("❌ Committed orders monitor error: {:?}", e);
                             // Hata durumunda processing'i true yap cünkü lock işlemine başlamak için bir sebep olamaz. durması daha evla.
                             Self::set_processing_true();
@@ -764,6 +786,7 @@ where
         let boundless_service = self.boundless_service.clone();
         let signer = self.signer.clone();
         let cached_config = self.cached_config.clone();
+        let config = self.config.clone();
         let http_client = self.http_client.clone();  // ✅ HTTP client'ı da clone'la
 
         Box::pin(async move {
@@ -780,6 +803,7 @@ where
                 signer,
                 cached_config,
                 http_client,  // ✅ Optimize edilmiş client'ı geç
+                config,
             )
                 .await
                 .map_err(SupervisorErr::Recover)?;
