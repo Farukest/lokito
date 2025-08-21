@@ -687,7 +687,7 @@ error = ?"#;
         assert_eq!(config.market.peak_prove_khz, Some(500));
         assert_eq!(config.market.min_deadline, 300);
         assert_eq!(config.market.min_lock_out_time, 40);
-        assert_eq!(config.market.wait_time_for_new_order, 360000);
+        assert_eq!(config.market.wait_time_for_new_order, Some(360));
         assert_eq!(config.market.lookback_blocks, 100);
         assert_eq!(config.market.max_stake, "0.1");
         assert_eq!(config.market.max_file_size, 50_000_000);
