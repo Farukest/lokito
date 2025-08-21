@@ -47,6 +47,12 @@ use crate::config::ConfigLock;
 use crate::provers::ProverObj;
 use serde_json::json;
 
+// ✅ WebSocket imports
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use futures_util::stream::{SplitSink, SplitStream};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use std::collections::HashMap;
+
 const BLOCK_TIME_SAMPLE_SIZE: u64 = 10;
 
 // Global cache'ler - offchain monitor'daki gibi
@@ -80,77 +86,179 @@ struct CachedConfig {
     allowed_requestor_addresses: Option<HashSet<Address>>,
     http_rpc_url: String,
     lockin_priority_gas: Option<u64>,
-    wait_time_for_new_order: Option<u64>,
 }
 
-// ✅ HTTP Client wrapper - connection pooling ile
-#[derive(Clone)]
-struct OptimizedHttpClient {
-    client: reqwest::Client,
-    rpc_url: String,
+// ✅ WebSocket Manager
+#[derive(Debug)]
+pub struct WebSocketRequest {
+    pub method: String,
+    pub params: serde_json::Value,
+    pub response_tx: oneshot::Sender<Result<serde_json::Value>>,
 }
 
-impl OptimizedHttpClient {
-    fn new(rpc_url: String) -> Self {
-        // ✅ Connection pooling ve keep-alive ile optimize edilmiş client
-        let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(10)           // Host başına max 10 idle connection
-            .pool_idle_timeout(Duration::from_secs(30))  // 30s sonra idle connection'ları kapat
-            .timeout(Duration::from_secs(10))      // Request timeout
-            .tcp_keepalive(Duration::from_secs(60)) // TCP keep-alive
-            .http2_keep_alive_interval(Some(Duration::from_secs(30))) // HTTP/2 keep-alive
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true)
-            .build()
-            .expect("Failed to create HTTP client");
+pub struct WebSocketManager {
+    sender: mpsc::UnboundedSender<WebSocketRequest>,
+    _handle: tokio::task::JoinHandle<()>,
+}
 
-        Self { client, rpc_url }
+impl WebSocketManager {
+    pub async fn new(ws_url: String) -> Result<Self> {
+        let (tx, rx) = mpsc::unbounded_channel::<WebSocketRequest>();
+
+        // WebSocket connection task'ı spawn et
+        let handle = tokio::spawn(Self::websocket_task(ws_url, rx));
+
+        Ok(Self {
+            sender: tx,
+            _handle: handle,
+        })
     }
 
-    // ✅ Hızlı mempool polling
-    async fn get_pending_block(&self) -> Result<serde_json::Value> {
-        let request_body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_getBlockByNumber",
-            "params": ["pending", true],
-            "id": 1
-        });
+    // Persistent WebSocket connection
+    async fn websocket_task(
+        ws_url: String,
+        mut request_rx: mpsc::UnboundedReceiver<WebSocketRequest>
+    ) {
+        let mut reconnect_attempts = 0;
+        const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
-        let response = self.client
-            .post(&self.rpc_url)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .context("Failed to get pending block")?;
+        loop {
+            match Self::connect_and_handle(&ws_url, &mut request_rx).await {
+                Ok(_) => {
+                    tracing::info!("✅ WebSocket connection ended normally");
+                    break;
+                }
+                Err(e) => {
+                    reconnect_attempts += 1;
+                    tracing::error!("❌ WebSocket error (attempt {}): {}", reconnect_attempts, e);
 
-        let data: serde_json::Value = response.json().await
-            .context("Failed to parse pending block response")?;
+                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                        tracing::error!("🚫 Max reconnection attempts reached");
+                        break;
+                    }
 
-        Ok(data)
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                }
+            }
+        }
     }
 
-    // ✅ Hızlı raw transaction gönderme
-    async fn send_raw_transaction(&self, tx_encoded: &[u8]) -> Result<serde_json::Value> {
-        let request_body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_sendRawTransaction",
-            "params": [format!("0x{}", hex::encode(tx_encoded))],
-            "id": 1
+    async fn connect_and_handle(
+        ws_url: &str,
+        request_rx: &mut mpsc::UnboundedReceiver<WebSocketRequest>
+    ) -> Result<()> {
+        tracing::info!("🔗 Connecting to WebSocket: {}", ws_url);
+
+        let (ws_stream, _) = connect_async(ws_url).await
+            .context("Failed to connect to WebSocket")?;
+
+        let (mut write, mut read) = ws_stream.split();
+
+        let pending_requests = Arc::new(Mutex::new(HashMap::<u64, oneshot::Sender<Result<serde_json::Value>>>::new()));
+        let mut request_id_counter = 1u64;
+
+        // Response handler task - ✅ Make it mutable
+        let pending_clone = pending_requests.clone();
+        let mut response_handler = tokio::spawn(async move {
+            while let Some(message) = read.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(id) = response.get("id").and_then(|v| v.as_u64()) {
+                                let mut pending = pending_clone.lock().await;
+                                if let Some(tx) = pending.remove(&id) {
+                                    let _ = tx.send(Ok(response));
+                                }
+                            }
+                        }
+                    }
+                    Ok(Message::Close(_)) => {
+                        tracing::warn!("⚠️ WebSocket connection closed by server");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ WebSocket read error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         });
 
-        let response = self.client
-            .post(&self.rpc_url)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .context("Failed to send raw transaction")?;
+        // Request handler loop
+        loop {
+            tokio::select! {
+                // Handle incoming requests
+                request = request_rx.recv() => {
+                    match request {
+                        Some(req) => {
+                            let request_id = request_id_counter;
+                            request_id_counter += 1;
 
-        let result: serde_json::Value = response.json().await
-            .context("Failed to parse raw transaction response")?;
+                            // Store response channel
+                            {
+                                let mut pending = pending_requests.lock().await;
+                                pending.insert(request_id, req.response_tx);
+                            }
 
-        Ok(result)
+                            // Send WebSocket message
+                            let ws_message = json!({
+                                "jsonrpc": "2.0",
+                                "method": req.method,
+                                "params": req.params,
+                                "id": request_id
+                            });
+
+                            if let Err(e) = write.send(Message::Text(ws_message.to_string())).await {
+                                tracing::error!("❌ Failed to send WebSocket message: {}", e);
+                                // Clean up pending request
+                                let mut pending = pending_requests.lock().await;
+                                if let Some(tx) = pending.remove(&request_id) {
+                                    let _ = tx.send(Err(anyhow::anyhow!("WebSocket send failed: {}", e)));
+                                }
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::info!("📡 Request channel closed, stopping WebSocket");
+                            break;
+                        }
+                    }
+                }
+
+                // Check if response handler died
+                _ = &mut response_handler => {
+                    tracing::error!("❌ Response handler task died");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Public method to send requests
+    pub async fn send_request(&self, method: String, params: serde_json::Value) -> Result<serde_json::Value> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = WebSocketRequest {
+            method,
+            params,
+            response_tx,
+        };
+
+        self.sender.send(request)
+            .map_err(|_| anyhow::anyhow!("WebSocket manager is dead"))?;
+
+        // 10 saniye timeout
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            response_rx
+        ).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(anyhow::anyhow!("Response channel closed")),
+            Err(_) => Err(anyhow::anyhow!("Request timeout")),
+        }
     }
 }
 
@@ -164,7 +272,7 @@ pub struct MarketMonitor<P> {
     prover: ProverObj,
     signer: PrivateKeySigner,
     cached_config: CachedConfig,
-    http_client: OptimizedHttpClient,  // ✅ Optimize edilmiş HTTP client
+    ws_manager: Option<WebSocketManager>,  // ✅ Make it optional for initialization
 }
 
 impl<P> MarketMonitor<P>
@@ -184,17 +292,15 @@ where
 
         // ✅ Config'i başlangıçta cache'le
         let cached_config = {
-            let conf = config.lock_all().context("Failed to read config during initialization").unwrap();
+            let conf = config.lock_all().expect("Failed to read config during initialization");
             CachedConfig {
                 allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
                 http_rpc_url: conf.market.my_rpc_url.clone(),
                 lockin_priority_gas: conf.market.lockin_priority_gas,
-                wait_time_for_new_order: conf.market.wait_time_for_new_order,
             }
         };
 
-        // ✅ Optimize edilmiş HTTP client oluştur
-        let http_client = OptimizedHttpClient::new(cached_config.http_rpc_url.clone());
+        tracing::info!("✅ MarketMonitor initialized (WebSocket will be created on spawn)");
 
         Self {
             market_addr,
@@ -206,7 +312,7 @@ where
             prover,
             signer,
             cached_config,
-            http_client,
+            ws_manager: None,  // Will be created in spawn
         }
     }
 
@@ -228,12 +334,10 @@ where
     }
 
     // ✅ Async dinleme servisi - committed orders'ları kontrol eder
-    async fn start_committed_orders_monitor(db_obj: DbObj, cached_config: CachedConfig) -> Result<()> {
+    async fn start_committed_orders_monitor(db_obj: DbObj) -> Result<()> {
         tracing::info!("👁️👁️ Starting committed orders monitor service...");
 
-        // ✅ Basit unwrap_or ile default 360 saniye
-        let wait_seconds = cached_config.wait_time_for_new_order.unwrap_or(360);
-        let check_interval = Duration::from_millis(wait_seconds * 1000);
+        let check_interval = Duration::from_millis(180000); // 180 saniyede bir kontrol
 
         loop {
             // Committed orders'ları kontrol et
@@ -275,10 +379,12 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
-        http_client: OptimizedHttpClient,  // ✅ Optimize edilmiş client
+        ws_manager: &WebSocketManager,  // ✅ WebSocket manager parametre
     ) -> std::result::Result<(), MarketMonitorErr> {
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
-        tracing::info!("🚀 Using optimized HTTP client with connection pooling");
+
+        // ✅ Cache'den HTTP RPC URL'i al
+        tracing::info!("Using RPC URL: {}", cached_config.http_rpc_url);
 
         // Chain ID ve initial nonce'u cache'le - offchain monitor'daki gibi
         let chain_id = 8453u64;
@@ -304,7 +410,7 @@ where
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
                     if let Err(e) = Self::get_mempool_content(
-                        &http_client,  // ✅ Optimize edilmiş client kullan
+                        &cached_config.http_rpc_url,  // ✅ Cache'den kullan
                         market_addr,
                         provider.clone(),
                         db_obj.clone(),
@@ -313,7 +419,8 @@ where
                         boundless_service,
                         prover.clone(),
                         signer.clone(),
-                        cached_config.clone(),
+                        cached_config.clone(),  // ✅ Cache'i geç
+                        ws_manager,  // ✅ WebSocket manager geç
                     ).await {
                         tracing::debug!("Error getting mempool content: {:?}", e);
                     }
@@ -323,7 +430,7 @@ where
     }
 
     async fn get_mempool_content(
-        http_client: &OptimizedHttpClient,  // ✅ Optimize edilmiş client
+        http_rpc_url: &str,
         market_addr: Address,
         provider: Arc<P>,
         db_obj: DbObj,
@@ -333,9 +440,26 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
+        ws_manager: &WebSocketManager,  // ✅ WebSocket manager parametre
     ) -> Result<()> {
-        // ✅ Optimize edilmiş HTTP client kullan
-        let data = http_client.get_pending_block().await?;
+        // HTTP request - exactly like Node.js fetch
+        let client = reqwest::Client::new();
+
+        let request_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": ["pending", true],
+        "id": 1
+    });
+
+        let response = client
+            .post(http_rpc_url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let data: serde_json::Value = response.json().await?;
 
         if let Some(result) = data.get("result") {
             Self::process_mempool_response(
@@ -348,7 +472,8 @@ where
                 &boundless_service,
                 prover,
                 signer,
-                cached_config,
+                cached_config,  // ✅ Cache'i geç
+                ws_manager,  // ✅ WebSocket manager geç
             ).await?;
         }
 
@@ -366,6 +491,7 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
+        ws_manager: &WebSocketManager,  // ✅ WebSocket manager parametre
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
             // ✅ Cache'den allowed requestors'u al
@@ -404,7 +530,8 @@ where
                                                     &boundless_service,
                                                     prover.clone(),
                                                     signer.clone(),
-                                                    cached_config.clone(),
+                                                    cached_config.clone(),  // ✅ Cache'i geç
+                                                    ws_manager,  // ✅ WebSocket manager geç
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
@@ -432,6 +559,7 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
+        ws_manager: &WebSocketManager,  // ✅ WebSocket manager parametre
     ) -> Result<()> {
 
         // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
@@ -484,16 +612,13 @@ where
         // ✅ Cache'den lockin_priority_gas al
         let lockin_priority_gas = cached_config.lockin_priority_gas;
 
-        // ✅ Optimize edilmiş HTTP client oluştur
-        let http_client = OptimizedHttpClient::new(cached_config.http_rpc_url.clone());
-
-        // send_private_transaction'ı optimize edilmiş client ile çağır
-        match Self::send_private_transaction(
+        // ✅ WebSocket ile optimize edilmiş private transaction
+        match Self::send_private_transaction_ws(
             &decoded.request,
             &decoded.clientSignature,
             &signer,
             market_addr,
-            &http_client,  // ✅ Optimize edilmiş client geç
+            ws_manager,  // ✅ WebSocket manager kullan
             lockin_priority_gas.unwrap_or(5000000),
             provider.clone(),
         ).await {
@@ -552,7 +677,7 @@ where
                     // ✅ Async dinleme servisini başlat
                     let db_clone = db_obj.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::start_committed_orders_monitor(db_clone, cached_config.clone()).await {
+                        if let Err(e) = Self::start_committed_orders_monitor(db_clone).await {
                             tracing::error!("❌ Committed orders monitor error: {:?}", e);
                             // Hata durumunda processing'i true yap cünkü lock işlemine başlamak için bir sebep olamaz. durması daha evla.
                             Self::set_processing_true();
@@ -572,13 +697,13 @@ where
         Ok(())
     }
 
-    // ✅ Optimize edilmiş send_private_transaction - connection pooling ile
-    async fn send_private_transaction(
+    // ✅ WebSocket ile optimize edilmiş send_private_transaction
+    async fn send_private_transaction_ws(
         request: &boundless_market::contracts::ProofRequest,
         client_signature: &alloy::primitives::Bytes,
         signer: &PrivateKeySigner,
         contract_address: Address,
-        http_client: &OptimizedHttpClient,  // ✅ Optimize edilmiş client
+        ws_manager: &WebSocketManager,  // ✅ WebSocket manager
         lockin_priority_gas: u64,
         provider: Arc<P>,
     ) -> Result<u64, anyhow::Error> {
@@ -617,12 +742,22 @@ where
         let tx_envelope: TxEnvelope = tx_signed.into();
         let tx_encoded = tx_envelope.encoded_2718();
 
-        let expected_tx_hash = tx_envelope.tx_hash();
+        // ✅ WebSocket ile gönder - HTTP yerine!
+        let params = json!([{
+            "tx": format!("0x{}", hex::encode(&tx_encoded)),
+            "maxBlockNumber": "0x0",
+            "source": "customer_farukest"
+        }]);
 
-        tracing::info!("------- SENDING NOW ------");
-        // ✅ Optimize edilmiş HTTP client kullan - connection pooling ile
-        let result = http_client.send_raw_transaction(&tx_encoded).await
-            .context("Failed to send raw transaction")?;
+        let start_time = std::time::Instant::now();
+
+        let result = ws_manager.send_request(
+            "eth_sendPrivateTransaction".to_string(),
+            params
+        ).await?;
+
+        let send_duration = start_time.elapsed();
+        tracing::info!("⚡ WebSocket send took: {:?}", send_duration);
 
         if let Some(error) = result.get("error") {
             let error_message = error.to_string().to_lowercase();
@@ -763,11 +898,24 @@ where
         let prover = self.prover.clone();
         let boundless_service = self.boundless_service.clone();
         let signer = self.signer.clone();
-        let cached_config = self.cached_config.clone();
-        let http_client = self.http_client.clone();  // ✅ HTTP client'ı da clone'la
+        let cached_config = self.cached_config.clone();  // ✅ Cache'i clone'la
+
+        // ✅ WebSocket manager'ı da clone'layıp move edelim
+        let ws_url = cached_config.http_rpc_url
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
 
         Box::pin(async move {
-            tracing::info!("🚀 Starting market monitor with optimized HTTP connections");
+            tracing::info!("Starting market monitor with WebSocket optimization");
+
+            // ✅ Her spawn'da yeni WebSocket connection oluştur
+            let ws_manager = match WebSocketManager::new(ws_url).await {
+                Ok(manager) => manager,
+                Err(e) => {
+                    tracing::error!("❌ Failed to create WebSocket manager: {}", e);
+                    return Err(SupervisorErr::Recover(MarketMonitorErr::UnexpectedErr(e)));
+                }
+            };
 
             Self::start_mempool_polling(
                 market_addr,
@@ -778,8 +926,8 @@ where
                 &boundless_service,
                 prover,
                 signer,
-                cached_config,
-                http_client,  // ✅ Optimize edilmiş client'ı geç
+                cached_config,  // ✅ Cache'i geç
+                &ws_manager,  // ✅ WebSocket manager geç
             )
                 .await
                 .map_err(SupervisorErr::Recover)?;

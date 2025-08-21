@@ -1,4 +1,5 @@
 name: bento
+# ONCHAIN A100 8X LOKITO
 # Anchors:
 x-base-environment: &base-environment
   DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
@@ -22,14 +23,14 @@ x-agent-common: &agent-common
 
 x-exec-agent-common: &exec-agent-common
   <<: *agent-common
-  mem_limit: 15G
-  cpus: 5
+  mem_limit: 100G
+  cpus: 25
   environment:
     <<: *base-environment
     LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
     RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
-    SEGMENT_SIZE: 21
-  entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
+    SEGMENT_SIZE: 22
+  entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-22} --redis-ttl ${REDIS_TTL:-57600}
 
 x-broker-environment: &broker-environment
   RUST_LOG: ${RUST_LOG:-info,broker=debug,boundless_market=debug}
@@ -52,6 +53,13 @@ x-broker-common: &broker-common
   depends_on:
     - rest_api
     - gpu_prove_agent0
+    - gpu_prove_agent1
+    - gpu_prove_agent2
+    - gpu_prove_agent3
+    - gpu_prove_agent4
+    - gpu_prove_agent5
+    - gpu_prove_agent6
+    - gpu_prove_agent7
     - exec_agent0
     - exec_agent1
     - aux_agent
@@ -62,8 +70,8 @@ x-broker-common: &broker-common
   build:
     context: .
     dockerfile: dockerfiles/broker.dockerfile
-  mem_limit: 2G
-  cpus: 2
+  mem_limit: 32G
+  cpus: 12
   stop_grace_period: 3h
   network_mode: host
 
@@ -145,8 +153,8 @@ services:
 
   aux_agent:
     <<: *agent-common
-    mem_limit: 256M
-    cpus: 1
+    mem_limit: 16G
+    cpus: 4
     environment:
       <<: *base-environment
       LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
@@ -156,18 +164,113 @@ services:
   gpu_prove_agent0:
     <<: *agent-common
     runtime: nvidia
-    mem_limit: 24G
-    cpus: 10
+    mem_limit: 100G
+    cpus: 14
     entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-
-    # comment-out if running in CPU proving mode
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              # TODO: how to scale this with N gpus?
               device_ids: ['0']
+              capabilities: [gpu]
+
+  gpu_prove_agent1:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+
+  gpu_prove_agent2:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+
+  gpu_prove_agent3:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['3']
+              capabilities: [gpu]
+
+  gpu_prove_agent4:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['4']
+              capabilities: [gpu]
+
+  gpu_prove_agent5:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['5']
+              capabilities: [gpu]
+
+  gpu_prove_agent6:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['6']
+              capabilities: [gpu]
+
+  gpu_prove_agent7:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 100G
+    cpus: 14
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['7']
               capabilities: [gpu]
 
   snark_agent:
@@ -189,8 +292,8 @@ services:
       - postgres
       - minio
 
-    mem_limit: 1G
-    cpus: 1
+    mem_limit: 16G
+    cpus: 5
 
     environment:
       <<: *base-environment

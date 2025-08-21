@@ -255,6 +255,7 @@ pub struct MarketConf {
 
     /// MIN LOCKOUT TIME THAT ACCEPT WHILE ORDER
     pub min_lock_out_time: u64,
+    pub wait_time_for_new_order: Option<u64>,
 
     pub my_rpc_url: String,
 
@@ -277,6 +278,7 @@ impl Default for MarketConf {
             peak_prove_khz: None,
             min_deadline: 120, // 2 mins
             min_lock_out_time: 40, // 2 mins
+            wait_time_for_new_order: Some(360),
             lookback_blocks: 100,
             max_stake: "0.1".to_string(),
             allow_client_addresses: None,
@@ -685,6 +687,7 @@ error = ?"#;
         assert_eq!(config.market.peak_prove_khz, Some(500));
         assert_eq!(config.market.min_deadline, 300);
         assert_eq!(config.market.min_lock_out_time, 40);
+        assert_eq!(config.market.wait_time_for_new_order, 360000);
         assert_eq!(config.market.lookback_blocks, 100);
         assert_eq!(config.market.max_stake, "0.1");
         assert_eq!(config.market.max_file_size, 50_000_000);
