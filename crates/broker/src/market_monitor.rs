@@ -425,6 +425,7 @@ where
                         }
 
                         // Then check if transaction is TO our market contract
+                        let parsing_start = std::time::Instant::now();
                         if let Some(to_addr) = tx_data.get("to").and_then(|t| t.as_str()) {
                             if let Ok(parsed_to) = to_addr.parse::<Address>() {
                                 if parsed_to == market_addr {
@@ -433,6 +434,7 @@ where
                                             if !seen_tx_hashes.contains(&parsed_hash) {
                                                 seen_tx_hashes.insert(parsed_hash);
 
+                                                let parsing_duration = parsing_start.elapsed(); // ⏱️ Süreyi hesapla
                                                 tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX!");
                                                 tracing::info!("   Hash: 0x{:x}", parsed_hash);
 
