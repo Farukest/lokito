@@ -227,8 +227,31 @@ where
         tracing::info!("🔓 Processing flag set to FALSE - allowing new orders");
     }
 
+    // ✅ Config'i güncelle ve yeni CachedConfig döndür
+    fn update_cached_config(config: &ConfigLock) -> Result<CachedConfig> {
+        let conf = config.lock_all().context("Failed to read config during update")?;
+        let updated_config = CachedConfig {
+            allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
+            http_rpc_url: conf.market.my_rpc_url.clone(),
+            lockin_priority_gas: conf.market.lockin_priority_gas,
+            wait_time_for_new_order: conf.market.wait_time_for_new_order,
+        };
+
+        tracing::info!("📖📖📖 CONFIG GÜNCELLENDI 📖📖📖");
+        tracing::info!("   - Allowed requestors: {:?}", updated_config.allowed_requestor_addresses.is_some());
+        tracing::info!("   - RPC URL: {}", updated_config.http_rpc_url);
+        tracing::info!("   - Priority gas: {:?}", updated_config.lockin_priority_gas);
+        tracing::info!("   - Wait time: {:?}", updated_config.wait_time_for_new_order);
+
+        Ok(updated_config)
+    }
+
     // ✅ Async dinleme servisi - committed orders'ları kontrol eder
-    async fn start_committed_orders_monitor(db_obj: DbObj, cached_config: CachedConfig, config: ConfigLock) -> Result<()> {
+    async fn start_committed_orders_monitor(
+        db_obj: DbObj,
+        mut cached_config: CachedConfig,
+        config: ConfigLock
+    ) -> Result<CachedConfig> {
         tracing::info!("👁️👁️ Starting committed orders monitor service...");
 
         // ✅ Basit unwrap_or ile default 360 saniye
@@ -244,16 +267,10 @@ where
 
                     // Eğer committed orders 0 ise, processing'i false yap ve servisi bitir
                     if count == 0 {
-                        // ✅ Config'i tekrar oluştur
-                        let conf = config.lock_all().context("Failed to read config during initialization").unwrap();
-                        CachedConfig {
-                            allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
-                            http_rpc_url: conf.market.my_rpc_url.clone(),
-                            lockin_priority_gas: conf.market.lockin_priority_gas,
-                            wait_time_for_new_order: conf.market.wait_time_for_new_order,
-                        };
-                        tracing::info!("📖📖📖 CONFIG GUNCELLENIYOR 📖📖📖");
-                        Duration::from_millis(5000);
+                        // ✅ Config'i gerçekten güncelle - burada yaptığın güncelleme
+                        cached_config = Self::update_cached_config(&config)?;
+
+                        tokio::time::sleep(Duration::from_millis(5000)).await;
                         Self::set_processing_false();
                         tracing::info!("✅ No committed orders found - monitor service stopping and proof checking continue..");
                         break; // Servis kendini iptal ediyor
@@ -261,7 +278,7 @@ where
                 }
                 Err(e) => {
                     tracing::error!("❌ Error checking committed orders: {:?}", e);
-                    // DB hatası olursa 5 saniye bekle ve tekrar dene
+                    // DB hatası olursa 10 saniye bekle ve tekrar dene
                     tokio::time::sleep(Duration::from_millis(10000)).await;
                     continue;
                 }
@@ -272,7 +289,7 @@ where
         }
 
         tracing::info!("🔚 Committed orders monitor service ended");
-        Ok(())
+        Ok(cached_config) // Güncellenmiş config'i döndür
     }
 
     async fn start_mempool_polling(
@@ -284,8 +301,8 @@ where
         boundless_service: &BoundlessMarketService<Arc<P>>,
         prover: ProverObj,
         signer: PrivateKeySigner,
-        cached_config: CachedConfig,
-        http_client: OptimizedHttpClient,  // ✅ Optimize edilmiş client
+        mut cached_config: CachedConfig, // ✅ mut yapıldı - güncellenebilir
+        http_client: OptimizedHttpClient,
         config: ConfigLock
     ) -> std::result::Result<(), MarketMonitorErr> {
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
@@ -314,14 +331,12 @@ where
                     return Ok(());
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
-
-
+                    
                     // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
                     if Self::is_currently_processing() {
-                        tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
+                        // tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
                         continue;
                     }
-
 
                     if let Err(e) = Self::get_mempool_content(
                         &http_client,  // ✅ Optimize edilmiş client kullan
@@ -333,8 +348,9 @@ where
                         boundless_service,
                         prover.clone(),
                         signer.clone(),
-                        cached_config.clone(),
-                        config.clone()
+                        cached_config.clone(), // ✅ Güncel config değerleri kullanılıyor
+                        config.clone(),
+                        &mut cached_config // ✅ Config güncellemesi için mutable referans
                     ).await {
                         tracing::debug!("Error getting mempool content: {:?}", e);
                     }
@@ -354,7 +370,8 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
-        config: ConfigLock
+        config: ConfigLock,
+        updated_cached_config: &mut CachedConfig // ✅ Config güncellemesi için
     ) -> Result<()> {
         // ✅ Optimize edilmiş HTTP client kullan
         let data = http_client.get_pending_block().await?;
@@ -371,7 +388,8 @@ where
                 prover,
                 signer,
                 cached_config,
-                config
+                config,
+                updated_cached_config
             ).await?;
         }
 
@@ -389,7 +407,8 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
-        config: ConfigLock
+        config: ConfigLock,
+        updated_cached_config: &mut CachedConfig
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
             // ✅ Cache'den allowed requestors'u al
@@ -429,7 +448,8 @@ where
                                                     prover.clone(),
                                                     signer.clone(),
                                                     cached_config.clone(),
-                                                    config.clone()
+                                                    config.clone(),
+                                                    updated_cached_config
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
@@ -457,7 +477,8 @@ where
         prover: ProverObj,
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
-        config: ConfigLock
+        config: ConfigLock,
+        updated_cached_config: &mut CachedConfig
     ) -> Result<()> {
 
         // Get transaction details
@@ -522,7 +543,7 @@ where
 
                 // RPC senkronizasyonu için küçük bir gecikme ekle
                 tracing::info!("⏳⏳⏳⏳⏳⏳⏳⏳⏳ Waiting for RPC to sync lock block... ⏳⏳⏳⏳⏳⏳⏳⏳");
-                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // 500 ms bekleme
+                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // 5000 ms bekleme
 
                 // Calculate lock price and save to DB
                 let lock_timestamp = provider
@@ -570,15 +591,37 @@ where
                     tracing::info!("💾✅ Order successfully saved to DB, processing flag set to TRUE 💾✅");
 
                     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                    // ✅ Async dinleme servisini başlat
+                    // ✅ Async dinleme servisini başlat ve güncellenmiş config'i al
                     let db_clone = db_obj.clone();
+                    let config_clone = config.clone();
+                    let current_cached_config = cached_config.clone();
+
                     tokio::spawn(async move {
-                        if let Err(e) = Self::start_committed_orders_monitor(db_clone, cached_config.clone(), config).await {
-                            tracing::info!("❌ Committed orders monitor error: {:?}", e);
-                            // Hata durumunda processing'i true yap cünkü lock işlemine başlamak için bir sebep olamaz. durması daha evla.
-                            Self::set_processing_true();
+                        match Self::start_committed_orders_monitor(db_clone, current_cached_config, config_clone).await {
+                            Ok(new_cached_config) => {
+                                tracing::info!("✅ Committed orders monitor completed with updated config");
+                                // Bu noktada new_cached_config güncellenmiş değerleri içeriyor
+                                // Ama bu spawn edilmiş task içinde, ana loop'a erişemiyoruz
+                                // Ana loop'ta updated_cached_config'i güncellememiz gerekiyor
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Committed orders monitor error: {:?}", e);
+                                // Hata durumunda processing'i true yap çünkü lock işlemine başlamak için bir sebep olamaz. Durması daha evla.
+                                Self::set_processing_true();
+                            }
                         }
                     });
+
+                    // ✅ Config'i hemen güncelle - spawn'dan sonra ana thread'de güncellensin
+                    match Self::update_cached_config(&config) {
+                        Ok(new_config) => {
+                            *updated_cached_config = new_config;
+                            tracing::info!("🔄 Main cached_config updated after processing order");
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to update main cached_config: {:?}", e);
+                        }
+                    }
                 }
             }
             Err(err) => {
