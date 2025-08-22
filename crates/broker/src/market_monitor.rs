@@ -330,10 +330,10 @@ where
                     tracing::info!("Mempool polling cancelled");
                     return Ok(());
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
                     // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
                     if Self::is_currently_processing() {
-                        tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
+                        // tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
                         continue;
                     }
 
@@ -428,8 +428,6 @@ where
 
                         // Then check if transaction is TO our market contract
                         if let Some(to_addr) = tx_data.get("to").and_then(|t| t.as_str()) {
-                            let parsing_start = std::time::Instant::now(); // ⏱️ Timer başlat
-
                             if let Ok(parsed_to) = to_addr.parse::<Address>() {
                                 if parsed_to == market_addr {
                                     if let Some(hash) = tx_data.get("hash").and_then(|h| h.as_str()) {
@@ -437,8 +435,7 @@ where
                                             if !seen_tx_hashes.contains(&parsed_hash) {
                                                 seen_tx_hashes.insert(parsed_hash);
 
-                                                let parsing_duration = parsing_start.elapsed(); // ⏱️ Süreyi hesapla
-                                                tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX! (Parsing: {:?})", parsing_duration);
+                                                tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX!");
                                                 tracing::info!("   Hash: 0x{:x}", parsed_hash);
 
                                                 // Process the transaction
