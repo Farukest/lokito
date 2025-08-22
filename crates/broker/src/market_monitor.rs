@@ -388,7 +388,8 @@ where
                 signer,
                 cached_config,
                 config,
-                updated_cached_config
+                updated_cached_config,
+                http_client // ✅ HTTP client'ı geç
             ).await?;
         }
 
@@ -407,7 +408,8 @@ where
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
         config: ConfigLock,
-        updated_cached_config: &mut CachedConfig
+        updated_cached_config: &mut CachedConfig,
+        http_client: &OptimizedHttpClient // ✅ HTTP client eklendi
     ) -> Result<()> {
         if let Some(transactions) = result.get("transactions").and_then(|t| t.as_array()) {
             // ✅ Cache'den allowed requestors'u al
@@ -425,8 +427,9 @@ where
                         }
 
                         // Then check if transaction is TO our market contract
-                        let parsing_start = std::time::Instant::now();
                         if let Some(to_addr) = tx_data.get("to").and_then(|t| t.as_str()) {
+                            let parsing_start = std::time::Instant::now(); // ⏱️ Timer başlat
+
                             if let Ok(parsed_to) = to_addr.parse::<Address>() {
                                 if parsed_to == market_addr {
                                     if let Some(hash) = tx_data.get("hash").and_then(|h| h.as_str()) {
@@ -435,7 +438,7 @@ where
                                                 seen_tx_hashes.insert(parsed_hash);
 
                                                 let parsing_duration = parsing_start.elapsed(); // ⏱️ Süreyi hesapla
-                                                tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX!");
+                                                tracing::info!("🔥 PENDING BLOCK'DA HEDEF TX! (Parsing: {:?})", parsing_duration);
                                                 tracing::info!("   Hash: 0x{:x}", parsed_hash);
 
                                                 // Process the transaction
@@ -450,7 +453,8 @@ where
                                                     signer.clone(),
                                                     cached_config.clone(),
                                                     config.clone(),
-                                                    updated_cached_config
+                                                    updated_cached_config,
+                                                    http_client // ✅ Pre-created HTTP client geç
                                                 ).await {
                                                     tracing::error!("Failed to process market tx: {:?}", e);
                                                 }
