@@ -518,7 +518,7 @@ where
         }
 
         // ⚡ HİZ CRİTİK: Hemen send et! Gereksiz işlemler yok!
-        tracing::info!("------- SENDING NOW ------");
+        tracing::info!("------- SENDING NOW 1 ------");
 
         // send_private_transaction'ı hızla çağır - önceden oluşturulmuş client ile
         match Self::send_private_transaction(
