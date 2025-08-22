@@ -245,14 +245,12 @@ where
                     // Eğer committed orders 0 ise, processing'i false yap ve servisi bitir
                     if count == 0 {
                         // ✅ Config'i tekrar oluştur
-                        let cached_config = {
-                            let conf = config.lock_all().context("Failed to read config during initialization").unwrap();
-                            CachedConfig {
-                                allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
-                                http_rpc_url: conf.market.my_rpc_url.clone(),
-                                lockin_priority_gas: conf.market.lockin_priority_gas,
-                                wait_time_for_new_order: conf.market.wait_time_for_new_order,
-                            }
+                        let conf = config.lock_all().context("Failed to read config during initialization").unwrap();
+                        CachedConfig {
+                            allowed_requestor_addresses: conf.market.allow_requestor_addresses.clone(),
+                            http_rpc_url: conf.market.my_rpc_url.clone(),
+                            lockin_priority_gas: conf.market.lockin_priority_gas,
+                            wait_time_for_new_order: conf.market.wait_time_for_new_order,
                         };
                         tracing::info!("📖📖📖 CONFIG GUNCELLENIYOR 📖📖📖");
                         Duration::from_millis(5000);
@@ -321,7 +319,7 @@ where
                     // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
                     if Self::is_currently_processing() {
                         tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
-                        return Ok(());
+                        continue;
                     }
 
 
@@ -563,19 +561,20 @@ where
                         new_order // Eski değerler kalsın
                     }
                 };
-
+                tracing::info!("💾 ORDER STARTING TO WRITE TO DB NOW");
                 if let Err(e) = db_obj.insert_accepted_request(&final_order, lock_price).await {
                     tracing::error!("Failed to insert accepted request: {:?}", e);
                 }else{
                     // ✅ DB'ye başarılı yazıldıktan SONRA processing = true
                     Self::set_processing_true();
-                    tracing::info!("💾 Order successfully saved to DB, processing flag set to TRUE");
+                    tracing::info!("💾✅ Order successfully saved to DB, processing flag set to TRUE 💾✅");
 
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                     // ✅ Async dinleme servisini başlat
                     let db_clone = db_obj.clone();
                     tokio::spawn(async move {
                         if let Err(e) = Self::start_committed_orders_monitor(db_clone, cached_config.clone(), config).await {
-                            tracing::error!("❌ Committed orders monitor error: {:?}", e);
+                            tracing::info!("❌ Committed orders monitor error: {:?}", e);
                             // Hata durumunda processing'i true yap cünkü lock işlemine başlamak için bir sebep olamaz. durması daha evla.
                             Self::set_processing_true();
                         }
