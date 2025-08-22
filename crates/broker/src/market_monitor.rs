@@ -94,16 +94,18 @@ impl OptimizedHttpClient {
     fn new(rpc_url: String) -> Self {
         // ✅ Connection pooling ve keep-alive ile optimize edilmiş client
         let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(10)           // Host başına max 10 idle connection
-            .pool_idle_timeout(Duration::from_secs(30))  // 30s sonra idle connection'ları kapat
-            .timeout(Duration::from_secs(10))      // Request timeout
-            .tcp_keepalive(Duration::from_secs(60)) // TCP keep-alive
-            .http2_keep_alive_interval(Some(Duration::from_secs(30))) // HTTP/2 keep-alive
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true)
+            .pool_max_idle_per_host(50)
+            .pool_idle_timeout(Duration::from_secs(1800)) // 30 dakika
+            .timeout(Duration::from_secs(1))
+            .connect_timeout(Duration::from_millis(100))
+            .tcp_keepalive(Duration::from_secs(30))
+            .tcp_nodelay(true)                       // ⭐ BU EN ÖNEMLİSİ
+            .http1_only()                            // ⭐ BU DA ÖNEMLİ
+            .no_brotli()                             // ✅ Compression kapatır
+            .no_gzip()                               // ✅ Compression kapatır
+            .no_deflate()                            // ✅ Compression kapatır
             .build()
             .expect("Failed to create HTTP client");
-
         Self { client, rpc_url }
     }
 
@@ -683,8 +685,10 @@ where
 
         tracing::info!("------- SENDING NOW ------");
         // ✅ Optimize edilmiş HTTP client kullan - connection pooling ile
-        let result = http_client.send_raw_transaction(&tx_encoded).await
-            .context("Failed to send raw transaction")?;
+        let send_start = Instant::now();
+        let result = http_client.send_raw_transaction(&tx_encoded).await?;
+        let send_duration = send_start.elapsed();
+        tracing::info!("🚀 Raw TX send duration: {:?}", send_duration);
 
         if let Some(error) = result.get("error") {
             let error_message = error.to_string().to_lowercase();
