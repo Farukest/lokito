@@ -331,10 +331,9 @@ where
                     return Ok(());
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
-                    
                     // ✅ İLK KONTROL: Şu anda processing yapıyor muyuz?
                     if Self::is_currently_processing() {
-                        // tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
+                        tracing::info!("⏳ Already processing an order, NO NEED TO CHECK MEMPOOL NOW");
                         continue;
                     }
 
@@ -478,7 +477,8 @@ where
         signer: PrivateKeySigner,
         cached_config: CachedConfig,
         config: ConfigLock,
-        updated_cached_config: &mut CachedConfig
+        updated_cached_config: &mut CachedConfig,
+        http_client: &OptimizedHttpClient, // ✅ Pre-created client geçiliyor
     ) -> Result<()> {
 
         // Get transaction details
@@ -503,7 +503,7 @@ where
 
         tracing::info!("   - Request ID: 0x{:x}", request_id);
 
-        // ✅ Cache'den allowed requestors kontrolü - sadece bir if ile!
+        // ✅ SADECE GEREKLİ KONTROL: Cache'den allowed requestors kontrolü
         if let Some(allow_addresses) = &cached_config.allowed_requestor_addresses {
             if !allow_addresses.contains(&client_addr) {
                 tracing::debug!("🚫 Client not in allowed requestors, skipping");
@@ -511,35 +511,32 @@ where
             }
         }
 
-        // Get chain ID from cache and create order - offchain monitor'daki gibi
-        let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
+        // ⚡ HİZ CRİTİK: Hemen send et! Gereksiz işlemler yok!
+        tracing::info!("------- SENDING NOW ------");
 
-        let mut new_order = OrderRequest::new(
-            decoded.request.clone(),
-            decoded.clientSignature.clone(),
-            FulfillmentType::LockAndFulfill,
-            market_addr,
-            chain_id,
-        );
-
-        // ✅ Cache'den lockin_priority_gas al
-        let lockin_priority_gas = cached_config.lockin_priority_gas;
-
-        // ✅ Optimize edilmiş HTTP client oluştur
-        let http_client = OptimizedHttpClient::new(cached_config.http_rpc_url.clone());
-
-        // send_private_transaction'ı optimize edilmiş client ile çağır
+        // send_private_transaction'ı hızla çağır - önceden oluşturulmuş client ile
         match Self::send_private_transaction(
             &decoded.request,
             &decoded.clientSignature,
             &signer,
             market_addr,
-            &http_client,  // ✅ Optimize edilmiş client geç
-            lockin_priority_gas.unwrap_or(5000000),
+            http_client,  // ✅ Önceden oluşturulmuş client
+            cached_config.lockin_priority_gas.unwrap_or(5000000),
             provider.clone(),
         ).await {
             Ok(lock_block) => {
                 tracing::info!("✅ Successfully locked request: 0x{:x} at block {}", request_id, lock_block);
+
+                // 🕒 BAŞARILI TX SONRASI: Artık zaman var, order oluştur
+                let chain_id = CACHED_CHAIN_ID.load(Ordering::Relaxed);
+
+                let mut new_order = OrderRequest::new(
+                    decoded.request.clone(),
+                    decoded.clientSignature.clone(),
+                    FulfillmentType::LockAndFulfill,
+                    market_addr,
+                    chain_id,
+                );
 
                 // RPC senkronizasyonu için küçük bir gecikme ekle
                 tracing::info!("⏳⏳⏳⏳⏳⏳⏳⏳⏳ Waiting for RPC to sync lock block... ⏳⏳⏳⏳⏳⏳⏳⏳");
@@ -626,10 +623,8 @@ where
             }
             Err(err) => {
                 tracing::info!("❌ Failed to lock request: 0x{:x}, error: {}", request_id, err);
-
-                if let Err(e) = db_obj.insert_skipped_request(&new_order).await {
-                    tracing::info!("Failed to insert skipped request: {:?}", e);
-                }
+                // ✅ Skip edilen tx'leri DB'ye yazmıyoruz - gereksiz!
+                // Zaten 1-1 işliyoruz, skip'lenenle işimiz yok
             }
         }
 
