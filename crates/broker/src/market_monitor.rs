@@ -470,6 +470,37 @@ where
         Ok(())
     }
 
+    async fn calculate_lock_price_with_retry(
+        provider: Arc<P>,
+        lock_block: u64,
+        new_order: &OrderRequest,
+    ) -> Result<(u64, U256)> {
+        tracing::info!("📊 Attempting to calculate lock price for block: {}", lock_block);
+
+        // Step 1: Get block data
+        let block = provider
+            .get_block_by_number(lock_block.into())
+            .await
+            .context(format!("Failed to get block data for block: {}", lock_block))?;
+
+        let block = block
+            .context(format!("Block {} not found on chain", lock_block))?;
+
+        let lock_timestamp = block.header.timestamp;
+        tracing::info!("📅 Lock timestamp: {}", lock_timestamp);
+
+        // Step 2: Calculate price at timestamp
+        let lock_price = new_order
+            .request
+            .offer
+            .price_at(lock_timestamp)
+            .context(format!("Failed to calculate price at timestamp: {}", lock_timestamp))?;
+
+        tracing::info!("💰 Calculated lock price: {} for timestamp: {}", lock_price, lock_timestamp);
+
+        Ok((lock_timestamp, lock_price))
+    }
+
     async fn process_market_tx(
         tx_data: &serde_json::Value,
         provider: Arc<P>,
@@ -544,22 +575,26 @@ where
 
                 // RPC senkronizasyonu için küçük bir gecikme ekle
                 tracing::info!("⏳⏳⏳⏳⏳⏳⏳⏳⏳ Waiting for RPC to sync lock block... ⏳⏳⏳⏳⏳⏳⏳⏳");
-                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // 5000 ms bekleme
+                tokio::time::sleep(tokio::time::Duration::from_millis(15000)).await; // 5000 ms bekleme
 
-                // Calculate lock price and save to DB
-                let lock_timestamp = provider
-                    .get_block_by_number(lock_block.into())
-                    .await
-                    .context("------------------------ lock_timestamp : Failed to get lock block.....")?
-                    .context("Lock block not found")?
-                    .header
-                    .timestamp;
-
-                let lock_price = new_order
-                    .request
-                    .offer
-                    .price_at(lock_timestamp)
-                    .context("------------------------ lock_price : Failed to calculate lock price.....")?;
+                let (lock_timestamp, lock_price) = loop {
+                    match Self::calculate_lock_price_with_retry(
+                        provider.clone(),
+                        lock_block,
+                        &new_order
+                    ).await {
+                        Ok((timestamp, price)) => {
+                            tracing::info!("✅ Successfully calculated lock price: {} at timestamp: {}", price, timestamp);
+                            break (timestamp, price);
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to calculate lock price: {:?}", e);
+                            tracing::info!("⏳ Retrying in 60 seconds...");
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                            continue; // Sonsuz döngü - başarılı olana kadar denemeye devam et
+                        }
+                    }
+                };
 
                 let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), input_hex).await {
                     Ok(confirmed_request) => {
