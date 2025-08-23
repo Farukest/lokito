@@ -94,18 +94,17 @@ impl OptimizedHttpClient {
     fn new(rpc_url: String) -> Self {
         // ✅ Connection pooling ve keep-alive ile optimize edilmiş client
         let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(50)
-            .pool_idle_timeout(Duration::from_secs(1800)) // 30 dakika
-            .timeout(Duration::from_secs(1))
-            .connect_timeout(Duration::from_millis(100))
-            .tcp_keepalive(Duration::from_secs(30))
-            .tcp_nodelay(true)                       // ⭐ BU EN ÖNEMLİSİ
-            .http1_only()                            // ⭐ BU DA ÖNEMLİ
-            .no_brotli()                             // ✅ Compression kapatır
-            .no_gzip()                               // ✅ Compression kapatır
-            .no_deflate()                            // ✅ Compression kapatır
+            .pool_max_idle_per_host(30)           // Host başına max 10 idle connection
+            .pool_idle_timeout(Duration::from_secs(30))  // 30s sonra idle connection'ları kapat
+            .timeout(Duration::from_secs(1))      // Request timeout
+            .connect_timeout(Duration::from_millis(500))
+            .tcp_keepalive(Duration::from_secs(60)) // TCP keep-alive
+            .http2_keep_alive_interval(Some(Duration::from_secs(30))) // HTTP/2 keep-alive
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
             .build()
             .expect("Failed to create HTTP client");
+
         Self { client, rpc_url }
     }
 
